@@ -3,8 +3,9 @@
 ![Doom E1M1 rendered on-chain, played back live from testnet](docs/demo.gif)
 
 *Live playback from testnet: every frame is rendered by the smart contract in the TVM and read back
-from the chain by the viewer ([mp4](docs/demo.mp4)). Watch it live: **https://1ixi1.github.io/ton-doom/**
-(polls toncenter once a second without an API key; frames appear while the demo feeder is running).*
+from the chain by the viewer (right); on the left, the frame transactions arriving in the explorer
+([mp4](docs/demo.mp4)). Watch it live: **https://1ixi1.github.io/ton-doom/** (polls toncenter once a
+second without an API key; the on-chain AI keeps walking by itself).*
 
 Doom E1M1 rendered **inside the TVM** on TON testnet. The smart contract keeps the player state and the
 level's BSP tree, receives player inputs as external messages, renders 1-bit frames on-chain and emits
