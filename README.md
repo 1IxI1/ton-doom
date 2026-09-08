@@ -55,7 +55,11 @@ Every transaction there is one rendered frame.
   With a local `config.js` (API key) it also has a **play** mode: arrows / WASD walk and turn, space
   fires; key samples (20/s) are packed into one external message per 0.5 s (`viewer/boc.js` builds the
   BOC in the browser), confirmed through the `lastBatch` get method and resent if a batch gets lost.
-  About 1.5 s from key press to the frame on screen (batching + block + streaming).
+  About 0.6–0.9 s from key press to the frame on screen (the first input after a pause is sent at once,
+  then one batch per 0.4 s; the rest is block inclusion + streaming). The "pending frames" option
+  subscribes with `min_finality: pending`: toncenter emulates the transactions on receipt and the frames
+  arrive in ~0.35 s, marked EMULATED (orange border) until the block confirms them; the confirmed frame
+  is compared with the emulated one and corrections are counted.
 * `tools/doom.py` — CLI: send inputs, run the autopilot demo feeder, dump frames as PNG.
 
 ## Running

@@ -23,7 +23,9 @@
   $('explorer').href = 'https://testnet.tonviewer.com/' + $('addr').value;
   const apiKey = () => CFG.key || '';   // never shown in the UI
   const hosted = !apiKey();
-  if (hosted) { $('fps').value = '15'; $('connect').hidden = true; }
+  if (hosted) { $('fps').value = '15'; $('connect').hidden = true; $('pendingopt').hidden = true; }
+  const usePending = () => !hosted && $('pending').checked;
+  $('pending').onchange = () => { if (ws) connectWs(); };
 
   const canvas = $('screen');
   const ctx = canvas.getContext('2d');
@@ -35,7 +37,7 @@
   let lastShown = 0;
   let paused = false;
   let ws = null, pollTimer = null, pollLt = 0;
-  const stat = { received: 0, dup: 0, shown: 0, partial: 0, lastNow: 0, latency: 0, gas: 0, queued: 0, playFps: 25 };
+  const stat = { received: 0, dup: 0, shown: 0, partial: 0, lastNow: 0, latency: 0, gas: 0, queued: 0, playFps: 25, confirmed: 0, mispredict: 0 };
 
   function log(msg, cls) {
     const el = document.createElement('div');
@@ -82,10 +84,28 @@
     return out;
   }
 
-  function ingestTx(tx) {
+  function sameColumns(a, b) {
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) { const x = a[i], y = b[i]; if (x.length !== y.length) return false; for (let j = 0; j < x.length; j++) if (x[j] !== y[j]) return false; }
+    return true;
+  }
+  function ingestTx(tx, finality) {
     for (const f of framesFromTx(tx)) {
+      f.finality = finality || 'confirmed';
       stat.received++;
-      if (seen.has(f.frameNo)) { stat.dup++; continue; }
+      const old = seen.get(f.frameNo);
+      if (old) {
+        // an emulated (pending) frame gets replaced by the real one; count and redraw if it differed
+        if (old.finality === 'pending' && f.finality !== 'pending') {
+          const same = sameColumns(old.columns, f.columns) && old.px === f.px && old.py === f.py && old.angle === f.angle;
+          if (!same) { stat.mispredict++; log(`emulated frame ${f.frameNo} differed from the chain, corrected`, 'warn'); }
+          old.finality = f.finality; old.columns = f.columns; old.px = f.px; old.py = f.py; old.angle = f.angle; old.flags = f.flags; old.now = f.now;
+          stat.confirmed = Math.max(stat.confirmed, f.frameNo);
+          if (f.frameNo === lastShown) drawFrame(old);   // refresh the badge (and the picture if it differed)
+        } else { stat.dup++; }
+        continue;
+      }
+      if (f.finality !== 'pending') stat.confirmed = Math.max(stat.confirmed, f.frameNo);
       seen.set(f.frameNo, f);
       if (f.frameNo <= lastShown) continue; // already past it (e.g. history replay)
       queue.push(f);
@@ -123,8 +143,9 @@
     stat.shown++;
     if (f.flags & 1) stat.partial++;
     stat.gas = f.gas; stat.queued = f.queued;
+    canvas.classList.toggle('emulated', f.finality === 'pending');
     $('stats').textContent =
-      `frame      ${f.frameNo}\n` +
+      `frame      ${f.frameNo}${f.finality === 'pending' ? '  EMULATED (toncenter, not yet in a block)' : ''}\n` +
       `res        ${f.w}x${f.h}${f.flags & 1 ? '  PARTIAL (gas budget hit)' : ''}\n` +
       `pos        ${(f.px / 65536).toFixed(1)}, ${(f.py / 65536).toFixed(1)}  z=${f.viewz}\n` +
       `angle      ${(f.angle * 360 / 512).toFixed(1)} deg\n` +
@@ -132,7 +153,8 @@
       `on-chain q ${f.queued} inputs\n` +
       `block time ${new Date(f.now * 1000).toLocaleTimeString()}  (latency ${stat.latency.toFixed(1)} s)\n` +
       `buffer     ${queue.length} frames, play ${stat.playFps.toFixed(1)} fps\n` +
-      `received   ${stat.received} (dup ${stat.dup}), shown ${stat.shown}, partial ${stat.partial}`;
+      `received   ${stat.received} (dup ${stat.dup}), shown ${stat.shown}, partial ${stat.partial}` +
+      (usePending() ? `\nconfirmed  up to frame ${stat.confirmed}, emulated frames corrected: ${stat.mispredict}` : '');
   }
 
   // playback loop: adaptive rate around the nominal fps
@@ -164,11 +186,12 @@
     const url = `wss://${DEFAULTS.base}/api/streaming/v2/ws?api_key=${encodeURIComponent(key)}`;
     setStatus('connecting…', 'warn');
     ws = new WebSocket(url);
+    const sock = ws;
     let pingTimer = null;
     ws.onopen = () => {
-      ws.send(JSON.stringify({ operation: 'subscribe', id: '1', addresses: [addr], types: ['transactions'], min_finality: 'confirmed' }));
+      ws.send(JSON.stringify({ operation: 'subscribe', id: '1', addresses: [addr], types: ['transactions'], min_finality: usePending() ? 'pending' : 'confirmed' }));
       pingTimer = setInterval(() => { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ operation: 'ping' })); }, 10000);
-      setStatus('subscribed (ws)', 'on');
+      setStatus(usePending() ? 'subscribed (ws, pending = emulated frames)' : 'subscribed (ws)', 'on');
       $('connect').classList.add('on');
       log('ws open, subscribed to ' + addr);
       loadHistory(addr, key, 60);
@@ -178,13 +201,19 @@
       if (d.status) return;
       if (d.type === 'transactions') {
         const txs = [...(d.transactions || [])].sort((a, b) => Number(a.lt) - Number(b.lt));
-        for (const tx of txs) ingestTx(tx);
+        for (const tx of txs) ingestTx(tx, d.finality);
       } else if (d.type === 'trace_invalidated') {
         log('trace invalidated ' + d.trace_external_hash_norm, 'warn');
       }
     };
-    ws.onclose = (e) => { clearInterval(pingTimer); setStatus('ws closed ' + e.code, 'err'); $('connect').classList.remove('on'); log('ws closed ' + e.code + ' ' + e.reason, 'err'); if (ws) setTimeout(connectWs, 2000); };
-    ws.onerror = () => { log('ws error', 'err'); };
+    ws.onclose = (e) => {
+      clearInterval(pingTimer);
+      if (ws !== sock) return;   // replaced or closed on purpose (disconnect / resubscribe)
+      ws = null;
+      setStatus('ws closed ' + e.code, 'err'); $('connect').classList.remove('on'); log('ws closed ' + e.code + ' ' + e.reason, 'err');
+      setTimeout(() => { if (!ws && !pollTimer) connectWs(); }, 2000);
+    };
+    ws.onerror = () => { if (ws === sock) log('ws error', 'err'); };
   }
 
   // ---- transport: REST polling fallback -------------------------------------------------------
@@ -235,11 +264,12 @@
   // Externals need no signature: batchId must be lastBatch+1 (or +2, one batch may overtake). We keep at
   // most two batches in flight, confirm them through the `lastBatch` get method and resend after 3 s.
   const OP_TICK = 0x444f4f4d;
-  const PLAY = { rate: 20, turn: 6, batchMs: 500, maxBatch: 29, inFlight: 2, resendMs: 3000, fireEvery: 8, tail: 3 };
+  const PLAY = { rate: 20, turn: 6, batchMs: 400, maxBatch: 29, inFlight: 2, resendMs: 3000, fireEvery: 8, tail: 3 };
   const KEYMAP = { ArrowUp: 'fwd', KeyW: 'fwd', ArrowDown: 'back', KeyS: 'back', ArrowLeft: 'left', ArrowRight: 'right',
                    KeyA: 'sleft', KeyD: 'sright', Space: 'fire', ControlLeft: 'fire', ControlRight: 'fire', KeyF: 'fire' };
   const keys = new Set();
   let playing = false, timers = [], pending = [], sent = [], nextBatch = 0, lastAck = 0, fireEdge = false, fireHold = 0, tail = 0;
+  let playAddr = '', lastFlushAt = 0;
   const pstat = { sentInputs: 0, batches: 0, resent: 0 };
 
   function onKey(e, down) {
@@ -260,6 +290,8 @@
     else if (tail > 0) tail--;          // a few idle frames after the last key: lets the flash/bob settle
     else return;
     pending.push([turn, fwd, side, fire]);
+    // first input after a pause: do not wait for the batch timer
+    if (pending.length === 1 && performance.now() - lastFlushAt > PLAY.batchMs) flush(playAddr);
   }
   async function api(path, body) {
     const r = await fetch(`https://${DEFAULTS.base}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey() }, body: JSON.stringify(body) });
@@ -281,6 +313,7 @@
     if (!pending.length || sent.length >= PLAY.inFlight) return;
     const inputs = pending.splice(0, PLAY.maxBatch);
     const id = nextBatch++;
+    lastFlushAt = performance.now();
     const rec = { id, inputs, boc: Boc.toBase64(Boc.serialize(tickMessage(addr, id, inputs))), at: performance.now() };
     sent.push(rec);
     try { await api('/api/v3/message', { boc: rec.boc }); pstat.batches++; pstat.sentInputs += inputs.length; }
@@ -313,7 +346,7 @@
     const addr = $('addr').value.trim();
     if (!apiKey()) { log('play needs the toncenter API key: run python3 tools/viewer_config.py and open the viewer locally', 'err'); return; }
     try { lastAck = await getLastBatch(addr); } catch (e) { log('cannot read lastBatch: ' + e.message, 'err'); return; }
-    nextBatch = lastAck + 1; sent = []; pending = []; keys.clear(); tail = 0;
+    nextBatch = lastAck + 1; sent = []; pending = []; keys.clear(); tail = 0; playAddr = addr; lastFlushAt = 0;
     playing = true; $('play').classList.add('on'); $('hint').hidden = false; $('about').hidden = true; $('about-play').hidden = false;
     timers = [setInterval(sample, 1000 / PLAY.rate), setInterval(() => flush(addr), PLAY.batchMs), setInterval(() => ack(addr), 1000)];
     log(`play: batches start at ${nextBatch}; arrows/WASD move, space fires`);
