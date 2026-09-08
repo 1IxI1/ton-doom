@@ -78,7 +78,8 @@ Every transaction there is one rendered frame; the four play servers are listed 
   steps) are packed into small batches (`viewer/boc.js` builds the BOC in the browser) sent to the relays,
   confirmed from the transaction stream and resent once with a nonce if a batch does not land. Without an
   API key all requests share one ~1/s queue (inputs first); with a key batches go every 0.3 s and frames
-  stream over WebSocket: 0.8 s from key press to the frame on screen. The "pending frames" option subscribes with
+  stream over WebSocket: 0.8 s from key press to the frame on screen. On phones the screen fills the width:
+  its left / right halves turn, tapping the pistol fires, a round stick below walks and strafes. The "pending frames" option subscribes with
   `min_finality: pending`: toncenter emulates the transactions on receipt and the frames arrive in ~0.35 s,
   marked EMULATED (orange border) until the block confirms them; the confirmed frame is compared with the
   emulated one and corrections are counted.

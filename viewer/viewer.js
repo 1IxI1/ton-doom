@@ -521,6 +521,59 @@
   window.addEventListener('keydown', (e) => onKey(e, true));
   window.addEventListener('keyup', (e) => onKey(e, false));
   window.addEventListener('blur', () => keys.clear());
+
+  // ---- touch controls (phones / tablets): screen left/right = turn, the pistol = fire, a stick = walk ----
+  const isMobile = window.matchMedia('(pointer: coarse)').matches && Math.min(window.innerWidth, window.innerHeight) < 900;
+  if (isMobile) {
+    document.body.classList.add('mobile');
+    const ensurePlaying = () => { if (!playing && !current.watchOnly) startPlay(); };
+    // the screen: pointers tracked by id so that turning and firing can overlap
+    const screenPointers = new Map();
+    const GUN = { x0: 0.33, x1: 0.64, y0: 0.55 };   // the pistol's area in screen fractions (columns 28..49 of 80, rows 69+ of 120)
+    const zoneOf = (e) => {
+      const r = canvas.getBoundingClientRect();
+      const x = (e.clientX - r.left) / r.width, y = (e.clientY - r.top) / r.height;
+      if (x >= GUN.x0 && x <= GUN.x1 && y >= GUN.y0) return 'fire';
+      return x < 0.5 ? 'left' : 'right';
+    };
+    canvas.addEventListener('pointerdown', (e) => {
+      e.preventDefault(); ensurePlaying();
+      const z = zoneOf(e);
+      screenPointers.set(e.pointerId, z);
+      if (z === 'fire') { fireEdge = true; keys.add('fire'); } else keys.add(z);
+      try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
+    });
+    const screenUp = (e) => {
+      const z = screenPointers.get(e.pointerId);
+      if (!z) return;
+      screenPointers.delete(e.pointerId);
+      if (![...screenPointers.values()].includes(z)) keys.delete(z);
+    };
+    canvas.addEventListener('pointerup', screenUp);
+    canvas.addEventListener('pointercancel', screenUp);
+    // the stick: forward / back / strafe by direction, dead zone in the middle
+    const stick = $('stick'), knob = $('knob');
+    let stickId = null;
+    const setStick = (dx, dy) => {   // dx, dy in -1..1
+      const R = 50;
+      knob.style.left = (50 + dx * R) + 'px'; knob.style.top = (50 + dy * R) + 'px';
+      for (const k of ['fwd', 'back', 'sleft', 'sright']) keys.delete(k);
+      if (dy < -0.35) keys.add('fwd'); else if (dy > 0.35) keys.add('back');
+      if (dx < -0.45) keys.add('sleft'); else if (dx > 0.45) keys.add('sright');
+    };
+    const stickMove = (e) => {
+      const r = stick.getBoundingClientRect();
+      let dx = (e.clientX - r.left - r.width / 2) / (r.width / 2), dy = (e.clientY - r.top - r.height / 2) / (r.height / 2);
+      const len = Math.hypot(dx, dy);
+      if (len > 1) { dx /= len; dy /= len; }
+      setStick(dx, dy);
+    };
+    stick.addEventListener('pointerdown', (e) => { e.preventDefault(); ensurePlaying(); stickId = e.pointerId; try { stick.setPointerCapture(e.pointerId); } catch (err) {} stickMove(e); });
+    stick.addEventListener('pointermove', (e) => { if (e.pointerId === stickId) stickMove(e); });
+    const stickUp = (e) => { if (e.pointerId !== stickId) return; stickId = null; setStick(0, 0); };
+    stick.addEventListener('pointerup', stickUp);
+    stick.addEventListener('pointercancel', stickUp);
+  }
   // RSET: teleport to the level start and revive the targets; goes through a relay like the inputs
   async function sendReset() {
     const addr = currentAddr();
