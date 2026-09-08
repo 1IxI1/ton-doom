@@ -26,11 +26,19 @@ PATHS = {
 }
 
 
-def gen(level: Level, inputs, W: int, H: int, png_dir=None, aspect_y: int = 1):
+def gen(level: Level, inputs, W: int, H: int, png_dir=None, aspect_y: int = 1, ai_frames: int = 0):
+    """inputs: list of (turn, fwd, side); ai_frames > 0: instead drive the on-chain wanderer AI (tools/ai.py)."""
     sx, sy, sa = level.player_start
     player = Player(level, sx, sy, sa)
     r = Renderer(level, W, H, aspect_y)
     frames = []
+    if ai_frames:
+        from ai import AiState, ai_step
+        st = AiState(player.x, player.y, player.angle)
+        inputs = []
+        for _ in range(ai_frames):
+            inputs.append(ai_step(level, st) + (0,))
+        player = Player(level, sx, sy, sa)
     for i, (turn, fwd, side) in enumerate(inputs):
         player.move(turn, fwd, side)
         viewz = player.viewz()
@@ -46,7 +54,8 @@ def gen(level: Level, inputs, W: int, H: int, png_dir=None, aspect_y: int = 1):
 
 def build_boc(inputs, frames, W, H):
     nxt = None
-    for chunk in reversed([inputs[i : i + 40] for i in range(0, len(inputs), 40)]):
+    chunks = [inputs[i : i + 40] for i in range(0, len(inputs), 40)] or [[]]
+    for chunk in reversed(chunks):
         b = begin_cell()
         for turn, fwd, side in chunk:
             b.store_int(turn, 8).store_int(fwd, 8).store_int(side, 8)
@@ -61,7 +70,8 @@ def build_boc(inputs, frames, W, H):
         if nxt is not None:
             b.store_ref(nxt)
         nxt = b.end_cell()
-    return begin_cell().store_uint(W, 16).store_uint(H, 16).store_uint(len(inputs), 8).store_ref(inputs_cell).store_ref(nxt).end_cell()
+    count = len(inputs) if inputs else len(frames)   # AI goldens carry no inputs: count = frames
+    return begin_cell().store_uint(W, 16).store_uint(H, 16).store_uint(count, 8).store_ref(inputs_cell).store_ref(nxt).end_cell()
 
 
 def main(argv=None):
@@ -73,10 +83,22 @@ def main(argv=None):
     ap.add_argument("--path", default="walk")
     ap.add_argument("--png-dir")
     ap.add_argument("--aspect", type=int, default=1, help="rows per column unit (2 for 80x120 shown as 4:3)")
+    ap.add_argument("--ai", type=int, default=0, help="drive the wanderer AI for this many frames instead of a path")
     args = ap.parse_args(argv)
     level = load_level(args.level)
-    inputs = PATHS[args.path]
-    frames = gen(level, inputs, args.W, args.H, args.png_dir, args.aspect)
+    if args.ai:
+        import json as _json
+        from blockmap import Blockmap
+        with open(args.level) as f:
+            level.blockmap = Blockmap(_json.load(f)) if False else None
+        # the blockmap must see the opened doors: rebuild from the same (mutated) data the level was built from
+        from render import open_doors
+        data = _json.load(open(args.level)); open_doors(data); level.blockmap = Blockmap(data)
+        frames = gen(level, [], args.W, args.H, args.png_dir, args.aspect, ai_frames=args.ai)
+        inputs = [(0, 0, 0)] * 0
+    else:
+        inputs = PATHS[args.path]
+        frames = gen(level, inputs, args.W, args.H, args.png_dir, args.aspect)
     root = build_boc(inputs, frames, args.W, args.H)
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     with open(args.out, "wb") as f:

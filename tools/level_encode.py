@@ -7,6 +7,7 @@ Layout (must match contracts/Doom.tolk):
       bits: rootIsSubsector:1
       ref0: BSP root (node cell or subsector cell)
       ref1: sin table root
+      ref2: blockmap (see tools/blockmap.py)
 
   node cell:
       bits: d1:3 d0:3 x:int16 y:int16 dx:int16 dy:int16   (d_s = (flags6 >> (3*s)) & 7)
@@ -33,6 +34,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from blockmap import Blockmap, encode_blockmap  # noqa: E402
 from boc import Cell, begin_cell  # noqa: E402
 from render import ANGLES, SIN, SKIP, Level, Seg  # noqa: E402
 
@@ -119,11 +121,13 @@ def encode_sin_table() -> Cell:
     return root.end_cell()
 
 
-def encode_level(level: Level) -> Cell:
+def encode_level(level: Level, data: dict) -> Cell:
     cache = {}
     is_ss, idx = level.root
     root_child = encode_child(level, is_ss, idx, cache)
-    return begin_cell().store_uint(1 if is_ss else 0, 1).store_ref(root_child).store_ref(encode_sin_table()).end_cell()
+    bm = encode_blockmap(Blockmap(data))
+    return (begin_cell().store_uint(1 if is_ss else 0, 1).store_ref(root_child).store_ref(encode_sin_table())
+            .store_ref(bm).end_cell())
 
 
 def count_cells(c: Cell, seen=None) -> int:
@@ -138,8 +142,9 @@ def main(argv=None):
     argv = argv or sys.argv[1:]
     src, dst = argv[0], argv[1]
     with open(src) as f:
-        level = Level(json.load(f))
-    root = encode_level(level)
+        data = json.load(f)
+    level = Level(data)   # opens doors in `data`
+    root = encode_level(level, data)
     data = root.to_boc()
     with open(dst, "wb") as f:
         f.write(data)

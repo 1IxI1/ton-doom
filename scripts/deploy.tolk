@@ -29,7 +29,7 @@ fun main() {
     val stateInit: ContractState = {
         code: build("Doom"),
         // player 1 start of E1M1: (1056, -3616), facing north (90 deg = 128 angle units)
-        data: Storage { frameNo: salt, px: 1056 << 16, py: -3616 << 16, angle: 128, lastBatch: 0, qpos: 0, queue: null, held: null, owner: wallet.address, level: level! }.toCell(),
+        data: Storage { frameNo: salt, px: 1056 << 16, py: -3616 << 16, angle: 128, lastBatch: 0, qpos: 0, queue: null, held: null, owner: wallet.address, auto: false, turnDir: 0, rnd: 1, lastStep: 0, level: level! }.toCell(),
     };
     val addr = AutoDeployAddress { stateInit }.calculateAddress();
     println("doom address: {}", addr);

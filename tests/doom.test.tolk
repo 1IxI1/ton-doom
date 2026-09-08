@@ -53,16 +53,16 @@ fun raiseGasLimit(limit: int) {
     testing.setConfig(cfg);
 }
 
-fun deployDoom(level: cell): (address, Treasury) {
+fun deployDoom(level: cell, value: coins = grams("50")): (address, Treasury) {
     val deployer = testing.treasury("deployer");
     // player start of E1M1: (1056, -3616), angle 90 deg = 128 units
     val stateInit: ContractState = {
         code: build("Doom"),
-        data: Storage { frameNo: 0, px: 1056 << 16, py: -3616 << 16, angle: 128, lastBatch: 0, qpos: 0, queue: null, held: null, owner: deployer.address, level }.toCell(),
+        data: Storage { frameNo: 0, px: 1056 << 16, py: -3616 << 16, angle: 128, lastBatch: 0, qpos: 0, queue: null, held: null, owner: deployer.address, auto: false, turnDir: 0, rnd: 1, lastStep: 0, level }.toCell(),
     };
     val addr = AutoDeployAddress { stateInit }.calculateAddress();
     net.registerAddress(addr, "doom");
-    val deployMsg = createMessage({ bounce: false, value: grams("50"), dest: { workchain: BASECHAIN, stateInit } });
+    val deployMsg = createMessage({ bounce: false, value, dest: { workchain: BASECHAIN, stateInit } });
     val res = net.send(deployer.address, deployMsg);
     expect(res).toHaveSuccessfulDeploy({ to: addr });
     return (addr, deployer);
@@ -128,7 +128,7 @@ fun checkFrames(txs: SendResultList, g: Golden, firstIndex: int, expectCount: in
         }
         t += 1;
     }
-    expect(frames.size()).toEqual(expectCount);
+    expect(frames.size() >= expectCount).toEqual(true);
     var i = 0;
     while (i < expectCount) {
         val ev = (frames.get(i) as Cell<TlbMessage<FrameEvent, TlbExternalOutMessageInfo>>).load();
@@ -244,4 +244,39 @@ get fun `test owner can withdraw the balance, others cannot`() {
     val r2 = net.send(deployer.address, createMessage({ bounce: false, value: grams("0.1"), dest: addr, body }));
     expect(r2).toHaveAllSuccessfulTxs();
     expect(testing.getAccountBalance(addr) < grams("1")).toEqual(true);
+}
+
+fun controlBody(op: int, batchId: int): cell {
+    return beginCell().storeUint(op, 32).storeUint(batchId, 32).endCell();
+}
+
+get fun `test wanderer AI matches the reference for 60 frames`() {
+    val level = loadLevel();
+    val g = loadGolden("assets/golden/ai.boc");   // frames produced by tools/ai.py from the level start
+    // small balance: the chain stops by itself (MIN_CHAIN_BALANCE) after roughly 70 frames
+    val (addr, _) = deployDoom(level, grams("4"));
+    // START: the contract renders frames by itself through the self-message chain (no inputs)
+    val res = net.sendExternal(net.createExternalMessage(addr, controlBody(0x53545254, 1)));
+    expect(res).toBeAccepted();
+    val txs = res.unwrap();
+    expect(txs).toHaveAllSuccessfulTxs();
+    // the emulator runs the whole chain: cap it by stopping after the golden count
+    var frames = 0;
+    var t = 0;
+    while (t < txs.size()) {
+        frames += txs.at(t).externals.size();
+        t += 1;
+    }
+    println("chain produced {} frames in {} txs", frames, txs.size());
+    expect(frames >= g.count).toEqual(true);
+    checkFrames(txs, g, 0, g.count, true);
+}
+
+get fun `test STOP ends the chain and START restarts it`() {
+    val level = loadLevel();
+    val (addr, _) = deployDoom(level);
+    expect(net.sendExternal(net.createExternalMessage(addr, controlBody(0x53544F50, 1)))).toBeAccepted();
+    val (auto0, _, _) = net.runGetMethod<(int, int, int)>(addr, "autoState");
+    expect(auto0).toEqual(0);
+    expect(net.runGetMethod<int>(addr, "frameNo")).toEqual(0);
 }

@@ -48,6 +48,7 @@ const GAS_BUDGET = 950000;        // hard stop for rendering work (leaves ~50k t
 const GAS_NODE_MARGIN = 25000;    // a node/subsector visit may add this much before the next check
 // (the per-run column guard, 2600 gas per column, is baked into the generated seg drawers)
 const CONT_VALUE = 100000000;     // 0.1 TON attached to each self-continuation (buys the 1M gas limit)
+const MIN_CHAIN_BALANCE = 400000000; // keep the chain going only while the balance is above 0.4 TON
 const SEG_TAIL_BITS = 66;         // bits of a seg record after kind + 4 coords
 const SHADE_UNIT2 = 2 * 96 << 16; // (d1 + d2) in 16.16 divided by this gives the shade level step (96 map units)
 
@@ -67,9 +68,22 @@ const FLOOR01 = PAT_L2_0 | (PAT_L2_1 << H); // floor pattern pair packed for the
 // Doom checkcoord table packed: nibble per boxpos = x1sel y1sel x2sel y2sel (1 = right / bottom)
 const CHECKCOORD = 9 | (8 << 4) | (12 << 8) | (1 << 16) | (14 << 24) | (3 << 32) | (7 << 36) | (6 << 40);
 
+// wanderer AI (mirrors tools/ai.py)
+const AI_TURN_RATE = 6;           // angle units per frame while turning on the spot
+const AI_STEER_RATE = 3;          // while walking away from a wall
+const AI_PROBE_NEAR = 24;         // map units ahead that must be free to walk
+const AI_PROBE_FAR = 72;          // if blocked: steer
+const AI_PROBE_SIDE = 48;         // whiskers at +-45 degrees
+const AI_SIDE_ANGLE = ANGLES / 8;
+const BLOCK_SHIFT = 7;            // 128-unit blockmap cells (tools/blockmap.py)
+const BLOCK_TREE_DEPTH = 5;
+const CHAIN_STALE_SECONDS = 4;    // START re-kicks the chain if no frame was rendered for this long
+
 const OP_TICK = 0x444F4F4D;     // "DOOM"  external: enqueue inputs
 const OP_CONT = 0x434F4E54;     // "CONT"  internal from self: render the next queued input
 const OP_RESET = 0x52534554;    // "RSET"  external: teleport the player back to the level start, drop the queue
+const OP_START = 0x53545254;    // "STRT"  external: let the on-chain AI walk by itself (self-sustaining chain)
+const OP_STOP = 0x53544F50;     // "STOP"  external: stop the AI (the chain ends when the queue is empty)
 
 const ERR_BAD_OP = 130;
 const ERR_BAD_COUNT = 131;
@@ -88,6 +102,10 @@ struct Storage {
     queue: cell?       // FIFO of inputs: cells [count:8, count x (turn:int8 fwd:int8 side:int8)], ref0 = next
     held: cell?        // batch lastBatch+2 that arrived before lastBatch+1 (reorder buffer of one batch)
     owner: address     // may withdraw the balance (internal message with op WDRW)
+    auto: bool         // the wanderer AI drives the player when the queue is empty
+    turnDir: int8      // AI: current turning episode direction (-1, 0, +1)
+    rnd: uint32        // AI: LCG state
+    lastStep: uint32   // unix time of the last rendered frame (chain liveness)
     level: cell        // see tools/level_encode.py
 }
 
@@ -443,6 +461,121 @@ fun drawSeg(mutate s: slice, cam: Cam): void {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Collisions: blockmap of blocking lines (tools/blockmap.py)
+// ---------------------------------------------------------------------------------------------
+// bm: blockmap root cell (ox:int16 oy:int16 cols:uint8 rows:uint8, ref0 = 4-ary tree of block cells).
+// Move (px,py) -> (nx,ny) in 16.16; true if it crosses a line that blocks in that direction.
+fun blocked(bm: cell, px: int, py: int, nx: int, ny: int): bool {
+    var h = bm.beginParse();
+    val ox = h.loadInt(16);
+    val oy = h.loadInt(16);
+    val cols = h.loadUint(8);
+    val rows = h.loadUint(8);
+    val tree = h.preloadRef();
+    val x0 = px >> 16;
+    val y0 = py >> 16;
+    val x1 = nx >> 16;
+    val y1 = ny >> 16;
+    val bxa = max((min(x0, x1) - ox) >> BLOCK_SHIFT, 0);
+    val bxb = min((max(x0, x1) - ox) >> BLOCK_SHIFT, cols - 1);
+    val bya = max((min(y0, y1) - oy) >> BLOCK_SHIFT, 0);
+    val byb = min((max(y0, y1) - oy) >> BLOCK_SHIFT, rows - 1);
+    val mx = nx - px;
+    val my = ny - py;
+    var by = bya;
+    while (by <= byb) {
+        var bx = bxa;
+        while (bx <= bxb) {
+            // tree lookup: 2 bits per level, top bits first
+            val idx = by * cols + bx;
+            var c = tree;
+            var shift = 2 * (BLOCK_TREE_DEPTH - 1);
+            repeat (BLOCK_TREE_DEPTH) {
+                c = c.beginParse().refAt((idx >> shift) & 3);
+                shift -= 2;
+            }
+            // lines of this block (with continuation cells)
+            var more = true;
+            while (more) {
+                var s = c.beginParse();
+                val n = s.loadUint(4);
+                repeat (n) {
+                    val lx1 = s.loadInt(16);
+                    val ly1 = s.loadInt(16);
+                    val lx2 = s.loadInt(16);
+                    val ly2 = s.loadInt(16);
+                    val flags = s.loadUint(2);   // bit1: blockFront, bit0: blockBack
+                    val dx = lx2 - lx1;
+                    val dy = ly2 - ly1;
+                    val c1 = dx * (py - (ly1 << 16)) - dy * (px - (lx1 << 16));
+                    val c2 = dx * (ny - (ly1 << 16)) - dy * (nx - (lx1 << 16));
+                    if ((c1 != 0) & (c2 != 0) & ((c1 < 0) != (c2 < 0))) {
+                        val e1 = mx * ((ly1 << 16) - py) - my * ((lx1 << 16) - px);
+                        val e2 = mx * ((ly2 << 16) - py) - my * ((lx2 << 16) - px);
+                        if ((e1 != 0) & (e2 != 0) & ((e1 < 0) != (e2 < 0))) {
+                            if (c1 < 0 ? (flags & 2) != 0 : (flags & 1) != 0) {
+                                return true;
+                            }
+                        }
+                    }
+                }
+                if (s.remainingRefsCount() > 0) {
+                    c = s.loadRef();
+                } else {
+                    more = false;
+                }
+            }
+            bx += 1;
+        }
+        by += 1;
+    }
+    return false;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Wanderer AI (mirrors tools/ai.py ai_step). Returns (turn, fwd) and updates rnd / turnDir.
+// ---------------------------------------------------------------------------------------------
+@inline
+fun probe(bm: cell, sinTable: cell, x: int, y: int, a: int, dist: int, da: int): bool {
+    val aa = (a + da) & ANGLE_MASK;
+    return blocked(bm, x, y, x + dist * sinAt(sinTable, (aa + QUARTER) & ANGLE_MASK), y + dist * sinAt(sinTable, aa));
+}
+
+fun aiStep(mutate st: Storage, bm: cell, sinTable: cell): (int, int) {
+    st.rnd = (st.rnd * 1103515245 + 12345) & 0xFFFFFFFF;
+    val x = st.px;
+    val y = st.py;
+    val a = st.angle;
+    val near = probe(bm, sinTable, x, y, a, AI_PROBE_NEAR, 0);
+    val left = probe(bm, sinTable, x, y, a, AI_PROBE_SIDE, AI_SIDE_ANGLE);
+    val right = probe(bm, sinTable, x, y, a, AI_PROBE_SIDE, ANGLES - AI_SIDE_ANGLE);
+    val coin = ((st.rnd >> 16) & 1) == 1 ? 1 : -1;
+    if (near) {
+        if (st.turnDir == 0) {
+            st.turnDir = (left != right) ? (right ? 1 : -1) : coin;
+        }
+        return (st.turnDir * AI_TURN_RATE, 0);
+    }
+    st.turnDir = 0;
+    var turn = 0;
+    if (left != right) {
+        turn = right ? AI_STEER_RATE : -AI_STEER_RATE;
+    } else if (probe(bm, sinTable, x, y, a, AI_PROBE_FAR, 0)) {
+        turn = coin * AI_STEER_RATE;
+    } else if (((st.rnd >> 12) & 3) == 0) {
+        turn = ((st.rnd >> 8) % 3) - 1;   // rare gentle drift
+    }
+    val a2 = (a + turn) & ANGLE_MASK;
+    val nx = x + SPEED_FWD * sinAt(sinTable, (a2 + QUARTER) & ANGLE_MASK);
+    val ny = y + SPEED_FWD * sinAt(sinTable, a2);
+    if (blocked(bm, x, y, nx, ny)) {
+        st.turnDir = coin;
+        return (st.turnDir * AI_TURN_RATE, 0);
+    }
+    return (turn, 1);
+}
+
+// ---------------------------------------------------------------------------------------------
 // Frame
 // ---------------------------------------------------------------------------------------------
 fun renderFrame(root: cell, rootIsSS: bool, cam: Cam): cell {
@@ -564,17 +697,22 @@ fun popInput(mutate st: Storage): (int, int, int, bool) {
     return (turn, fwd, side, true);
 }
 
-// Render one queued input (if any) and keep the chain going.
+// Render one input (queued, or produced by the AI when the queue is empty and auto is on) and keep the
+// chain going while there is more to do.
 fun step(mutate st: Storage, hop: int) {
-    val (turn, fwd, side, found) = popInput(mutate st);
-    if (!found) {
-        return;
-    }
     var lvl = st.level.beginParse();
     val rootIsSS = lvl.loadUint(1) == 1;
     val root = lvl.loadRef();
     val sinTable = lvl.loadRef();
-    // move (noclip)
+    var (turn, fwd, side, found) = popInput(mutate st);
+    if (!found) {
+        if (!st.auto) {
+            return;
+        }
+        (turn, fwd) = aiStep(mutate st, lvl.loadRef(), sinTable);
+        side = 0;
+    }
+    // move (noclip for queued inputs; the AI checks collisions itself)
     val angle = (st.angle + turn) & ANGLE_MASK;
     val sn = sinAt(sinTable, angle);
     val cs = sinAt(sinTable, (angle + QUARTER) & ANGLE_MASK);
@@ -589,7 +727,8 @@ fun step(mutate st: Storage, hop: int) {
     val pixels = renderFrame(root, rootIsSS, cam);
     val queued = queuedCount(st.queue, st.qpos);
     emitFrame(st, viewz, pixels, queued);
-    if (queued > 0) {
+    st.lastStep = blockchain.now();
+    if (((queued > 0) | st.auto) & (contract.getOriginalBalance() > MIN_CHAIN_BALANCE)) {
         val cont = createMessage({
             bounce: false,
             value: CONT_VALUE,
@@ -641,6 +780,22 @@ fun onExternalMessage(inBody: slice) {
     // sender re-sends it later. This lets the sender keep two batches in flight.
     val isNext = batchId == st.lastBatch + 1;
     assert (isNext | ((batchId == st.lastBatch + 2) & (st.held == null))) throw ERR_OLD_BATCH;
+    if ((op == OP_START) | (op == OP_STOP)) {
+        assert (isNext) throw ERR_OLD_BATCH;
+        acceptExternalMessage();
+        st.lastBatch = batchId;
+        val wasAuto = st.auto;
+        st.auto = op == OP_START;
+        st.turnDir = 0;
+        st.save();
+        commitContractDataAndActions();
+        // kick the chain if it is not already running
+        if (st.auto & (!wasAuto | (blockchain.now() - st.lastStep > CHAIN_STALE_SECONDS))) {
+            step(mutate st, 0);
+            st.save();
+        }
+        return;
+    }
     if (op == OP_RESET) {
         assert (isNext) throw ERR_OLD_BATCH;
         // body: op:32 batchId:32 px:int32 py:int32 angle:uint16 (16.16 map units)
@@ -704,6 +859,11 @@ get fun queued(): int {
 get fun lastBatch(): int {
     val st = Storage.load();
     return st.lastBatch;
+}
+
+get fun autoState(): (int, int, int) {
+    val st = Storage.load();
+    return (st.auto ? 1 : 0, st.turnDir, st.lastStep);
 }
 
 get fun screen(): (int, int) {

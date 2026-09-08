@@ -5,6 +5,7 @@
   python3 tools/doom.py demo <addr> [--rate 20] [--batch 8]              feed the scripted E1M1 walk forever
   python3 tools/doom.py frames <addr> [--limit 20] [--png-dir DIR]       fetch recent frames, dump PNGs
   python3 tools/doom.py state <addr>                                     print get-method state
+  python3 tools/doom.py start|stop [<addr>]                              on-chain wanderer AI on/off
 
 Message formats (must match contracts/Doom.tolk):
   tick (external in):  op:32=0x444F4F4D batchId:32 count:8  count x (turn:int8 fwd:int8 side:int8)
@@ -27,6 +28,8 @@ from boc import Address, Cell, begin_cell, deserialize_boc, external_message  # 
 OP_TICK = 0x444F4F4D
 OP_FRAME = 0x4652414D
 OP_RESET = 0x52534554
+OP_START = 0x53545254
+OP_STOP = 0x53544F50
 START = (1056, -3616, 128)   # E1M1 player start (x, y, angle units)
 ANGLES = 512
 
@@ -46,6 +49,18 @@ def tick_body(batch_id: int, inputs) -> Cell:
 def send_tick(addr: Address, batch_id: int, inputs) -> str:
     msg = external_message(addr, tick_body(batch_id, inputs))
     return toncenter.send_boc(msg.to_boc())
+
+
+def send_control(addr: Address, batch_id: int, op: int) -> str:
+    body = begin_cell().store_uint(op, 32).store_uint(batch_id, 32).end_cell()
+    return toncenter.send_boc(external_message(addr, body).to_boc())
+
+
+def cmd_control(args, op):
+    st = get_state(args.addr)
+    batch_id = (st["lastBatch"] or 0) + 1
+    print("sent", hex(op), "batch", batch_id, "->", send_control(Address.parse(args.addr), batch_id, op)[:12])
+    return 0
 
 
 def send_reset(addr: Address, batch_id: int, x=START[0], y=START[1], angle=START[2]) -> str:
@@ -270,6 +285,8 @@ def main(argv=None):
     p.add_argument("--skip", type=int, default=0, help="skip this many inputs of the route (resume position)")
     p.add_argument("--no-reset", action="store_true", help="do not teleport the player to the start first"); p.set_defaults(fn=cmd_demo)
     p = sub.add_parser("reset"); p.add_argument("addr", nargs="?", default=default_addr); p.add_argument("--batch", type=int, required=True); p.set_defaults(fn=lambda a: print(send_reset(Address.parse(a.addr), a.batch)))
+    p = sub.add_parser("start", help="let the on-chain AI walk by itself"); p.add_argument("addr", nargs="?", default=default_addr); p.set_defaults(fn=lambda a: cmd_control(a, OP_START))
+    p = sub.add_parser("stop", help="stop the on-chain AI"); p.add_argument("addr", nargs="?", default=default_addr); p.set_defaults(fn=lambda a: cmd_control(a, OP_STOP))
     p = sub.add_parser("frames"); p.add_argument("addr", nargs="?", default=default_addr); p.add_argument("--limit", type=int, default=20)
     p.add_argument("--png-dir"); p.set_defaults(fn=cmd_frames)
     p = sub.add_parser("state"); p.add_argument("addr", nargs="?", default=default_addr); p.set_defaults(fn=cmd_state)

@@ -33,6 +33,11 @@ Nothing is rendered off-chain: only `turn / forward / strafe` inputs go to the c
   empty. Frames therefore continue across blocks at up to the block gas limit (~10 frames per 0.4 s block).
 * A gas guard keeps every transaction under 1M gas: when the budget is hit, the frame is emitted partial
   (`flags & 1`) instead of failing.
+* **Wanderer AI on-chain** (`STRT` / `STOP` externals): when the input queue is empty the contract drives
+  the player itself — three probes (ahead, ±45°) against a Doom-style blockmap of blocking lines, turning on
+  the spot when blocked, steering away from walls while walking, a little random drift (LCG in state). The
+  self-message chain then runs with no external process at all, until `STOP` or the balance drops below
+  0.4 TON. `tools/ai.py` + `tools/blockmap.py` are the bit-exact reference.
 * `tools/render.py` — the reference renderer in Python, bit-exact with the contract (the tests compare
   frame hashes). `tools/golden.py` builds golden frames, `tools/level_encode.py` packs E1M1 into cells,
   `tools/wad.py` parses the WAD, `tools/boc.py` is a dependency-free BOC/cell library.
