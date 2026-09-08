@@ -75,6 +75,11 @@ const AI_PROBE_NEAR = 24;         // map units ahead that must be free to walk
 const AI_PROBE_FAR = 72;          // if blocked: steer
 const AI_PROBE_SIDE = 48;         // whiskers at +-45 degrees
 const AI_SIDE_ANGLE = ANGLES / 8;
+
+// Weapon overlay (tools/sprites.py): the pistol bobs while walking (rows down by frameNo & 15, 2 bits per
+// entry) and fires now and then: a muzzle flash for GUN_FLASH_FRAMES frames when (rnd >> 20) & 63 == 0.
+const GUN_BOB_TABLE = 0x05AFFA50;   // [0,0,1,1,2,2,3,3,3,3,2,2,1,1,0,0]
+const GUN_FLASH_FRAMES = 2;
 const BLOCK_SHIFT = 7;            // 128-unit blockmap cells (tools/blockmap.py)
 const BLOCK_TREE_DEPTH = 5;
 const CHAIN_STALE_SECONDS = 4;    // START re-kicks the chain if no frame was rendered for this long
@@ -106,6 +111,7 @@ struct Storage {
     turnDir: int8      // AI: current turning episode direction (-1, 0, +1)
     rnd: uint32        // AI: LCG state
     lastStep: uint32   // unix time of the last rendered frame (chain liveness)
+    gun: uint8         // muzzle flash frames left
     level: cell        // see tools/level_encode.py
 }
 
@@ -542,7 +548,6 @@ fun probe(bm: cell, sinTable: cell, x: int, y: int, a: int, dist: int, da: int):
 }
 
 fun aiStep(mutate st: Storage, bm: cell, sinTable: cell): (int, int) {
-    st.rnd = (st.rnd * 1103515245 + 12345) & 0xFFFFFFFF;
     val x = st.px;
     val y = st.py;
     val a = st.angle;
@@ -578,7 +583,30 @@ fun aiStep(mutate st: Storage, bm: cell, sinTable: cell): (int, int) {
 // ---------------------------------------------------------------------------------------------
 // Frame
 // ---------------------------------------------------------------------------------------------
-fun renderFrame(root: cell, rootIsSS: bool, cam: Cam): cell {
+// Draw the weapon over the rendered columns: per column pixels := (pixels & ~mask) | sprite, both shifted
+// down by `bob` rows. Sprite cell: x0:8 w:8, ref0 = idle columns, ref1 = flash columns (pix:H mask:H each,
+// COLS_PER_CELL per cell, ref0 = next).
+fun overlayGun(sprite: cell, flash: bool, bob: int) {
+    var s = sprite.beginParse();
+    val x0 = s.loadUint(8);
+    val w = s.loadUint(8);
+    val idle = s.loadRef();
+    var cols = (flash ? s.loadRef() : idle).beginParse();
+    var fb = gFb;
+    var x = x0;
+    repeat (w) {
+        if (cols.remainingBitsCount() == 0) {
+            cols = cols.loadRef().beginParse();
+        }
+        val pix = cols.loadUint(H) >> bob;
+        val mask = cols.loadUint(H) >> bob;
+        fb.set((fb.get(x) & ~mask) | pix, x);
+        x += 1;
+    }
+    gFb = fb;
+}
+
+fun renderFrame(root: cell, rootIsSS: bool, cam: Cam, gun: cell, flash: bool, bob: int): cell {
     val gas0 = getGasConsumedAtTheMoment();
     var fb: array<int> = [];
     repeat (W) {
@@ -598,6 +626,7 @@ fun renderFrame(root: cell, rootIsSS: bool, cam: Cam): cell {
     if (DEBUG) { gProfNodes = 0; gProfSegs = 0; gProfSegsDrawn = 0; gProfCols = 0; gProfGasCols = 0; gProfGasSegs = 0; gProfGasCulled = 0; gProfGasSetup = 0; }
     val gas1 = getGasConsumedAtTheMoment();
     renderNode(root, rootIsSS, cam);
+    overlayGun(gun, flash, bob);
     val gas2 = getGasConsumedAtTheMoment();
     // pack columns into a cell chain, built from the last cell backwards
     fb = gFb;
@@ -704,12 +733,21 @@ fun step(mutate st: Storage, hop: int) {
     val rootIsSS = lvl.loadUint(1) == 1;
     val root = lvl.loadRef();
     val sinTable = lvl.loadRef();
+    val blockmap = lvl.loadRef();
+    val gun = lvl.loadRef();
     var (turn, fwd, side, found) = popInput(mutate st);
+    if (!found & !st.auto) {
+        return;
+    }
+    // per-frame bookkeeping shared by both paths (tools/ai.py frame_begin)
+    st.rnd = (st.rnd * 1103515245 + 12345) & 0xFFFFFFFF;
+    st.frameNo += 1;
+    st.gun = st.gun > 0 ? st.gun - 1 : 0;
+    if (((st.rnd >> 20) & 63) == 0) {
+        st.gun = GUN_FLASH_FRAMES;
+    }
     if (!found) {
-        if (!st.auto) {
-            return;
-        }
-        (turn, fwd) = aiStep(mutate st, lvl.loadRef(), sinTable);
+        (turn, fwd) = aiStep(mutate st, blockmap, sinTable);
         side = 0;
     }
     // move (noclip for queued inputs; the AI checks collisions itself)
@@ -721,10 +759,10 @@ fun step(mutate st: Storage, hop: int) {
     st.angle = angle;
     st.px = px;
     st.py = py;
-    st.frameNo += 1;
     val viewz = floorAt(root, rootIsSS, px, py) + VIEWHEIGHT;
     val cam: Cam = { px, py, sn, cs, vz: viewz };
-    val pixels = renderFrame(root, rootIsSS, cam);
+    val bob = fwd != 0 ? (GUN_BOB_TABLE >> ((st.frameNo & 15) * 2)) & 3 : 0;
+    val pixels = renderFrame(root, rootIsSS, cam, gun, st.gun > 0, bob);
     val queued = queuedCount(st.queue, st.qpos);
     emitFrame(st, viewz, pixels, queued);
     st.lastStep = blockchain.now();

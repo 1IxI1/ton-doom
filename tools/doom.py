@@ -126,16 +126,29 @@ def frames_from_tx(tx: dict):
 # --------------------------------------------------------------------------- #
 # demo path: a loop around the E1M1 start area (turn, forward, strafe per frame)
 # --------------------------------------------------------------------------- #
-def demo_path():
-    """Endless generator of inputs: the autopilot loop from tools/path.py (simulated exactly)."""
+def demo_path(ai_seed=None):
+    """Endless generator of inputs. ai_seed=None: the waypoint loop from tools/path.py;
+    otherwise the wanderer AI from tools/ai.py simulated off-chain (collisions included) with that seed."""
     import json
     from path import DEFAULT_ROUTE, autopilot
-    from render import Level
+    from render import ANGLES, FRAC, Level
     here = os.path.dirname(os.path.abspath(__file__))
     with open(os.path.join(here, "..", "assets", "e1m1.json")) as f:
-        level = Level(json.load(f))
-    for inp, _ in autopilot(level, DEFAULT_ROUTE, max_frames=10**9, loop=True):
-        yield inp
+        data = json.load(f)
+    level = Level(data)
+    if ai_seed is None:
+        for inp, _ in autopilot(level, DEFAULT_ROUTE, max_frames=10**9, loop=True):
+            yield inp
+        return
+    from ai import AiState, ai_step, frame_begin
+    from blockmap import Blockmap
+    level.blockmap = Blockmap(data)
+    sx, sy, sa = level.player_start
+    st = AiState(sx << FRAC, sy << FRAC, sa * ANGLES // 360, rnd=ai_seed & 0xFFFFFFFF)
+    while True:
+        frame_begin(st)
+        turn, fwd = ai_step(level, st)
+        yield (turn, fwd, 0)
 
 
 # --------------------------------------------------------------------------- #
@@ -237,7 +250,9 @@ def cmd_demo(args):
                 time.sleep(1.5)
                 batch_id = (get_state(args.addr)["lastBatch"] or 0) + 1
         time.sleep(2.0)
-    path = demo_path()
+    seed = None if args.route == "loop" else (int(time.time()) if args.seed is None else args.seed)
+    print("route:", args.route, "seed:", seed, flush=True)
+    path = demo_path(seed)
     if args.skip:
         for _ in range(args.skip):
             next(path)
@@ -283,7 +298,9 @@ def main(argv=None):
     p = sub.add_parser("demo"); p.add_argument("addr", nargs="?", default=default_addr); p.add_argument("--rate", type=float, default=20.0, help="inputs per second")
     p.add_argument("--batch", type=int, default=36, help="inputs per external (<= 39; keep externals <= ~2/s)"); p.add_argument("--max-queue", type=int, default=80)
     p.add_argument("--skip", type=int, default=0, help="skip this many inputs of the route (resume position)")
-    p.add_argument("--no-reset", action="store_true", help="do not teleport the player to the start first"); p.set_defaults(fn=cmd_demo)
+    p.add_argument("--no-reset", action="store_true", help="do not teleport the player to the start first")
+    p.add_argument("--route", choices=["ai", "loop"], default="ai", help="ai: off-chain wanderer simulation (default); loop: fixed waypoints")
+    p.add_argument("--seed", type=int, help="wanderer seed (default: current time)"); p.set_defaults(fn=cmd_demo)
     p = sub.add_parser("reset"); p.add_argument("addr", nargs="?", default=default_addr); p.add_argument("--batch", type=int, required=True); p.set_defaults(fn=lambda a: print(send_reset(Address.parse(a.addr), a.batch)))
     p = sub.add_parser("start", help="let the on-chain AI walk by itself"); p.add_argument("addr", nargs="?", default=default_addr); p.set_defaults(fn=lambda a: cmd_control(a, OP_START))
     p = sub.add_parser("stop", help="stop the on-chain AI"); p.add_argument("addr", nargs="?", default=default_addr); p.set_defaults(fn=lambda a: cmd_control(a, OP_STOP))

@@ -16,7 +16,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from boc import begin_cell  # noqa: E402
-from render import ANGLES, FRAC, Level, Player, Renderer, frame_cell_chain, load_level  # noqa: E402
+from render import ANGLES, FRAC, VIEWHEIGHT, Level, Player, Renderer, cos_a, frame_cell_chain, load_level, sin_a  # noqa: E402
 
 PATHS = {
     # (turn, forward, strafe) per frame
@@ -26,25 +26,36 @@ PATHS = {
 }
 
 
-def gen(level: Level, inputs, W: int, H: int, png_dir=None, aspect_y: int = 1, ai_frames: int = 0):
-    """inputs: list of (turn, fwd, side); ai_frames > 0: instead drive the on-chain wanderer AI (tools/ai.py)."""
+def gen(level: Level, inputs, W: int, H: int, png_dir=None, aspect_y: int = 1, ai_frames: int = 0, wad=None):
+    """inputs: list of (turn, fwd, side); ai_frames > 0: instead drive the on-chain wanderer AI (tools/ai.py).
+    Frames get the weapon overlay (bob while walking, muzzle flash on random shots), like the contract."""
+    from ai import AiState, ai_step, frame_begin, gun_bob
+    from sprites import gun_sprites, overlay
     sx, sy, sa = level.player_start
-    player = Player(level, sx, sy, sa)
+    st = AiState(sx << FRAC, sy << FRAC, sa * ANGLES // 360)
     r = Renderer(level, W, H, aspect_y)
+    x0, w, idle, flash = gun_sprites(wad or os.path.join(os.path.dirname(__file__), "..", "assets", "doom1.wad"), W, H)
     frames = []
+    n = ai_frames or len(inputs)
     if ai_frames:
-        from ai import AiState, ai_step
-        st = AiState(player.x, player.y, player.angle)
         inputs = []
-        for _ in range(ai_frames):
-            inputs.append(ai_step(level, st) + (0,))
-        player = Player(level, sx, sy, sa)
-    for i, (turn, fwd, side) in enumerate(inputs):
-        player.move(turn, fwd, side)
-        viewz = player.viewz()
-        cols = r.render(player.x, player.y, player.angle, viewz, stats=True)
+    for i in range(n):
+        frame_begin(st)
+        if ai_frames:
+            turn, fwd = ai_step(level, st)
+            inputs.append((turn, fwd, 0))
+        else:
+            turn, fwd, side = inputs[i]
+            st.angle = (st.angle + turn) % ANGLES
+            c, s_ = cos_a(st.angle), sin_a(st.angle)
+            st.x += fwd * 8 * c + side * 6 * s_
+            st.y += fwd * 8 * s_ - side * 6 * c
+            st.moving = fwd != 0
+        viewz = (level.point_in_subsector(st.x, st.y).floor + VIEWHEIGHT) << FRAC
+        cols = r.render(st.x, st.y, st.angle, viewz, stats=True)
+        overlay(cols, flash if st.gun > 0 else idle, H, gun_bob(st))
         chain = frame_cell_chain(cols, W, H)
-        frames.append((i + 1, player.x, player.y, player.angle, viewz >> FRAC, chain.hash(), r.stats, cols))
+        frames.append((i + 1, st.x, st.y, st.angle, viewz >> FRAC, chain.hash(), r.stats, cols))
         if png_dir:
             from png import write_bitmap_png
             os.makedirs(png_dir, exist_ok=True)

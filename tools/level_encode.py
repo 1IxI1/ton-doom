@@ -8,6 +8,7 @@ Layout (must match contracts/Doom.tolk):
       ref0: BSP root (node cell or subsector cell)
       ref1: sin table root
       ref2: blockmap (see tools/blockmap.py)
+      ref3: weapon sprite (see tools/sprites.py)
 
   node cell:
       bits: d1:3 d0:3 x:int16 y:int16 dx:int16 dy:int16   (d_s = (flags6 >> (3*s)) & 7)
@@ -25,7 +26,7 @@ Layout (must match contracts/Doom.tolk):
 
   sin table: root -> up to 4 branch cells -> leaf cells with 56 x int18 entries (16.16 fixed point sin)
 
-Usage: python3 tools/level_encode.py assets/e1m1.json assets/e1m1-level.boc
+Usage: python3 tools/level_encode.py assets/e1m1.json assets/e1m1-level.boc [assets/doom1.wad [W H]]
 """
 from __future__ import annotations
 
@@ -35,6 +36,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from blockmap import Blockmap, encode_blockmap  # noqa: E402
+from sprites import encode_gun  # noqa: E402
 from boc import Cell, begin_cell  # noqa: E402
 from render import ANGLES, SIN, SKIP, Level, Seg  # noqa: E402
 
@@ -121,13 +123,14 @@ def encode_sin_table() -> Cell:
     return root.end_cell()
 
 
-def encode_level(level: Level, data: dict) -> Cell:
+def encode_level(level: Level, data: dict, wad_path: str, W: int, H: int) -> Cell:
     cache = {}
     is_ss, idx = level.root
     root_child = encode_child(level, is_ss, idx, cache)
     bm = encode_blockmap(Blockmap(data))
+    gun = encode_gun(wad_path, W, H)
     return (begin_cell().store_uint(1 if is_ss else 0, 1).store_ref(root_child).store_ref(encode_sin_table())
-            .store_ref(bm).end_cell())
+            .store_ref(bm).store_ref(gun).end_cell())
 
 
 def count_cells(c: Cell, seen=None) -> int:
@@ -141,10 +144,13 @@ def count_cells(c: Cell, seen=None) -> int:
 def main(argv=None):
     argv = argv or sys.argv[1:]
     src, dst = argv[0], argv[1]
+    wad = argv[2] if len(argv) > 2 else os.path.join(os.path.dirname(src), "doom1.wad")
+    W = int(argv[3]) if len(argv) > 3 else 80
+    H = int(argv[4]) if len(argv) > 4 else 120
     with open(src) as f:
         data = json.load(f)
     level = Level(data)   # opens doors in `data`
-    root = encode_level(level, data)
+    root = encode_level(level, data, wad, W, H)
     data = root.to_boc()
     with open(dst, "wb") as f:
         f.write(data)

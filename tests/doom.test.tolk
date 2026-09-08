@@ -58,7 +58,7 @@ fun deployDoom(level: cell, value: coins = grams("50")): (address, Treasury) {
     // player start of E1M1: (1056, -3616), angle 90 deg = 128 units
     val stateInit: ContractState = {
         code: build("Doom"),
-        data: Storage { frameNo: 0, px: 1056 << 16, py: -3616 << 16, angle: 128, lastBatch: 0, qpos: 0, queue: null, held: null, owner: deployer.address, auto: false, turnDir: 0, rnd: 1, lastStep: 0, level }.toCell(),
+        data: Storage { frameNo: 0, px: 1056 << 16, py: -3616 << 16, angle: 128, lastBatch: 0, qpos: 0, queue: null, held: null, owner: deployer.address, auto: false, turnDir: 0, rnd: 1, lastStep: 0, gun: 0, level }.toCell(),
     };
     val addr = AutoDeployAddress { stateInit }.calculateAddress();
     net.registerAddress(addr, "doom");

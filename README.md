@@ -16,7 +16,7 @@ Nothing is rendered off-chain: only `turn / forward / strafe` inputs go to the c
 ## How it works
 
 ```
- inputs (3 bytes/frame) ──external──▶ Doom.tolk ──┬─▶ FrameEvent (ext-out, 80x60 1-bit)  ──▶ toncenter ──▶ viewer
+ inputs (3 bytes/frame) ──external──▶ Doom.tolk ──┬─▶ FrameEvent (ext-out, 80x120 1-bit)  ──▶ toncenter ──▶ viewer
                                        ▲          └─▶ Continue (internal to itself, 0.1 TON)
                                        └──────────────────┘   one frame per transaction, up to ~10 per block
 ```
@@ -38,6 +38,9 @@ Nothing is rendered off-chain: only `turn / forward / strafe` inputs go to the c
   the spot when blocked, steering away from walls while walking, a little random drift (LCG in state). The
   self-message chain then runs with no external process at all, until `STOP` or the balance drops below
   0.4 TON. `tools/ai.py` + `tools/blockmap.py` are the bit-exact reference.
+* **Pistol**: the weapon sprite (PISGA0 + muzzle flash PISFA0 from the WAD, downscaled and dithered by
+  `tools/sprites.py`, stored in the level cell) is composited over every frame on-chain; it bobs while
+  walking and fires now and then (a two-frame flash when the state LCG hits 1/64). No ammo, no damage.
 * `tools/render.py` — the reference renderer in Python, bit-exact with the contract (the tests compare
   frame hashes). `tools/golden.py` builds golden frames, `tools/level_encode.py` packs E1M1 into cells,
   `tools/wad.py` parses the WAD, `tools/boc.py` is a dependency-free BOC/cell library.
@@ -49,12 +52,15 @@ Nothing is rendered off-chain: only `turn / forward / strafe` inputs go to the c
 ```bash
 acton build && acton test                  # emulator: golden-frame tests, gas numbers
 acton script scripts/deploy.tolk --net testnet     # deploy (wallet main-w9), prints DOOM_ADDRESS
+acton script scripts/topup.tolk --net testnet <addr> 50000      # top up; scripts/withdraw.tolk takes it back
+python3 tools/doom.py start                        # let the on-chain AI run (stop: doom.py stop)
 python3 tools/doom.py demo --rate 25 --batch 30   # feed the scripted E1M1 walk (address from .env)
 python3 tools/viewer_config.py && open viewer/index.html   # viewer config (address, key) from .env
 ```
 
 `.env` (not committed) holds `TONCENTER_TESTNET_API_KEY=...` and `DOOM_ADDRESS=...` (printed by the deploy
-script). Needs `assets/doom1.wad` (shareware; `python3 tools/wad.py assets/doom1.wad E1M1 --json assets/e1m1.json`).
+script). Needs `assets/doom1.wad` (shareware; `python3 tools/wad.py assets/doom1.wad E1M1 --json assets/e1m1.json`,
+then `python3 tools/level_encode.py assets/e1m1.json assets/e1m1-level.boc` packs the level, blockmap and sprite).
 
 ## Numbers (testnet, 80x120 shown at 4:3)
 

@@ -40,16 +40,37 @@ def blocked(level: Level, px: int, py: int, nx: int, ny: int) -> bool:
     return level.blockmap.blocked(px, py, nx, ny)
 
 
+BOBTAB = [0, 0, 1, 1, 2, 2, 3, 3, 3, 3, 2, 2, 1, 1, 0, 0]   # weapon bob (rows) by frameNo & 15 while walking
+BOBTAB_PACKED = sum(v << (2 * i) for i, v in enumerate(BOBTAB))   # the contract keeps it as one constant
+GUN_FLASH_FRAMES = 2
+
+
 class AiState:
     def __init__(self, x: int, y: int, angle: int, rnd: int = 1, turn_dir: int = 0):
         self.x, self.y, self.angle = x, y, angle
         self.rnd = rnd
         self.turn_dir = turn_dir
+        self.gun = 0        # muzzle flash frames left
+        self.frame_no = 0
+        self.moving = False
+
+
+def frame_begin(st: AiState):
+    """Per-frame bookkeeping shared by the AI and the queued-input paths (mirrors Doom.tolk step)."""
+    st.rnd = lcg(st.rnd)
+    st.frame_no += 1
+    st.gun = max(st.gun - 1, 0)
+    if ((st.rnd >> 20) & 63) == 0:
+        st.gun = GUN_FLASH_FRAMES
+
+
+def gun_bob(st: AiState) -> int:
+    return BOBTAB[st.frame_no & 15] if st.moving else 0
 
 
 def ai_step(level: Level, st: AiState):
-    """Advances the state by one frame; returns the (turn, fwd) it applied. Mirrors Doom.tolk aiStep."""
-    st.rnd = lcg(st.rnd)
+    """Decides and applies this frame's (turn, fwd) from the current rnd (call frame_begin first).
+    Mirrors Doom.tolk aiStep."""
     x, y, a = st.x, st.y, st.angle
 
     def probe(dist, da):
@@ -85,6 +106,7 @@ def ai_step(level: Level, st: AiState):
     if fwd:
         st.x += SPEED_FWD * cos_a(st.angle)
         st.y += SPEED_FWD * sin_a(st.angle)
+    st.moving = fwd != 0
     return turn, fwd
 
 
@@ -102,6 +124,7 @@ def main(argv=None):
     path = []
     moves = 0
     for _ in range(args.frames):
+        frame_begin(st)
         turn, fwd = ai_step(level, st)
         moves += fwd
         path.append((st.x / 65536, st.y / 65536))
