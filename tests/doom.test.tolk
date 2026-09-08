@@ -58,7 +58,7 @@ fun deployDoom(level: cell): (address, Treasury) {
     // player start of E1M1: (1056, -3616), angle 90 deg = 128 units
     val stateInit: ContractState = {
         code: build("Doom"),
-        data: Storage { frameNo: 0, px: 1056 << 16, py: -3616 << 16, angle: 128, lastBatch: 0, qpos: 0, queue: null, level }.toCell(),
+        data: Storage { frameNo: 0, px: 1056 << 16, py: -3616 << 16, angle: 128, lastBatch: 0, qpos: 0, queue: null, held: null, level }.toCell(),
     };
     val addr = AutoDeployAddress { stateInit }.calculateAddress();
     net.registerAddress(addr, "doom");
@@ -191,17 +191,29 @@ get fun `test bad opcode is rejected before accept`() {
     expect(res).toBeNotAccepted();
 }
 
-get fun `test batches must arrive in strict order`() {
+get fun `test batch ordering with a one-batch reorder buffer`() {
     val level = loadLevel();
-    val g = loadGolden("assets/golden/still.boc");
+    val g = loadGolden("assets/golden/walk.boc");
     val (addr, _) = deployDoom(level);
-    // batch 2 before batch 1: rejected before accept
-    expect(net.sendExternal(net.createExternalMessage(addr, tickBody(g, 0, 1, 2)))).toBeNotAccepted();
-    expect(net.sendExternal(net.createExternalMessage(addr, tickBody(g, 0, 1, 1)))).toBeAccepted();
-    // duplicate of batch 1: rejected
-    expect(net.sendExternal(net.createExternalMessage(addr, tickBody(g, 0, 1, 1)))).toBeNotAccepted();
-    expect(net.sendExternal(net.createExternalMessage(addr, tickBody(g, 0, 1, 2)))).toBeAccepted();
+    // batch 3 before batch 1: rejected before accept (only lastBatch+1 and lastBatch+2 are accepted)
+    expect(net.sendExternal(net.createExternalMessage(addr, tickBody(g, 4, 2, 3)))).toBeNotAccepted();
+    // batch 2 before batch 1: held
+    expect(net.sendExternal(net.createExternalMessage(addr, tickBody(g, 2, 2, 2)))).toBeAccepted();
+    expect(net.runGetMethod<int>(addr, "lastBatch")).toEqual(0);
+    expect(net.runGetMethod<int>(addr, "queued")).toEqual(0);
+    // a second early batch while one is held: rejected
+    expect(net.sendExternal(net.createExternalMessage(addr, tickBody(g, 2, 2, 2)))).toBeNotAccepted();
+    // batch 1 arrives: appended, then the held batch 2 follows it in order
+    val res = net.sendExternal(net.createExternalMessage(addr, tickBody(g, 0, 2, 1)));
+    expect(res).toBeAccepted();
+    expect(res.unwrap()).toHaveAllSuccessfulTxs();
     expect(net.runGetMethod<int>(addr, "lastBatch")).toEqual(2);
+    // the four inputs were rendered in golden order (frames 1..4)
+    checkFrames(res.unwrap(), g, 0, 4, false);
+    // duplicate of batch 2: rejected; batch 3 accepted; batch 4 accepted (held: nothing pending) then rendered
+    expect(net.sendExternal(net.createExternalMessage(addr, tickBody(g, 2, 2, 2)))).toBeNotAccepted();
+    expect(net.sendExternal(net.createExternalMessage(addr, tickBody(g, 4, 2, 3)))).toBeAccepted();
+    expect(net.runGetMethod<int>(addr, "lastBatch")).toEqual(3);
 }
 
 get fun `test reset teleports the player and drops the queue`() {

@@ -36,7 +36,7 @@ ANGLES = 512
 # --------------------------------------------------------------------------- #
 def tick_body(batch_id: int, inputs) -> Cell:
     inputs = list(inputs)
-    assert 1 <= len(inputs) <= 40
+    assert 1 <= len(inputs) <= 39
     b = begin_cell().store_uint(OP_TICK, 32).store_uint(batch_id, 32).store_uint(len(inputs), 8)
     for turn, fwd, side in inputs:
         b.store_int(turn, 8).store_int(fwd, 8).store_int(side, 8)
@@ -154,31 +154,56 @@ def cmd_state(args):
     return 0
 
 
-def send_with_retry(addr, addr_str, batch_id, inputs, t0, sent_inputs):
-    """Send one batch and retry the same inputs until the chain accepts it (strict batch order)."""
-    attempt = 0
-    while True:
+def send_batch(addr, batch_id, inputs, t0, note=""):
+    """One send attempt. Returns True if toncenter accepted the message (it may still get lost)."""
+    try:
+        h = send_tick(addr, batch_id, inputs)
+        print(f"[{time.time()-t0:7.1f}s] batch {batch_id} ({len(inputs)} inputs){note} -> {h[:12]}...", flush=True)
+        return True
+    except Exception as e:  # noqa: BLE001
+        msg = str(e)
+        if "exitcode=132" not in msg:
+            print(f"send failed: {msg[:140]}", flush=True)
+            time.sleep(0.5)
+        return False
+
+
+class Pipeline:
+    """Keeps up to two batches in flight (the contract holds lastBatch+2 until lastBatch+1 lands).
+    A batch is re-sent if the contract's lastBatch has not reached it within ack_timeout seconds."""
+
+    def __init__(self, addr, addr_str, first_batch, t0, ack_timeout=3.0):
+        self.addr, self.addr_str, self.t0, self.ack_timeout = addr, addr_str, t0, ack_timeout
+        self.next_id = first_batch
+        self.inflight = []   # [batch_id, inputs, sent_at, attempts]
+        self.last = first_batch - 1
+
+    def refresh(self):
         try:
-            h = send_tick(addr, batch_id, inputs)
-            print(f"[{time.time()-t0:7.1f}s] batch {batch_id} ({len(inputs)} inputs, total {sent_inputs}) -> {h[:12]}...", flush=True)
-            return batch_id + 1
-        except Exception as e:  # noqa: BLE001
-            attempt += 1
-            msg = str(e)
-            if "exitcode=132" in msg:
-                # not the next batch yet (previous one still pending) or already applied
-                st = get_state(addr_str)
-                last = st["lastBatch"] or 0
-                if last >= batch_id:
-                    # our own earlier send of this very batch landed (same inputs): move on
-                    print(f"  batch {batch_id} already applied (lastBatch={last})", flush=True)
-                    return batch_id + 1
-                # previous batch still pending: keep the SAME id and inputs, just wait
-                time.sleep(0.25)
-            else:
-                if attempt <= 3 or attempt % 20 == 0:
-                    print(f"send failed (attempt {attempt}): {msg[:140]}", flush=True)
-                time.sleep(min(3.0, 0.3 * attempt))
+            last = get_state(self.addr_str)["lastBatch"]
+            if last is not None:
+                self.last = max(self.last, last)
+        except Exception:  # noqa: BLE001
+            pass
+        self.inflight = [f for f in self.inflight if f[0] > self.last]
+
+    def push(self, inputs):
+        """Blocks until there is room in the window, then sends the batch."""
+        while True:
+            self.refresh()
+            now = time.time()
+            for f in self.inflight:
+                if now - f[2] > self.ack_timeout:
+                    f[3] += 1
+                    if send_batch(self.addr, f[0], f[1], self.t0, f" resend #{f[3]}"):
+                        f[2] = now
+            if len(self.inflight) < 2 and (not self.inflight or self.next_id <= self.last + 2):
+                break
+            time.sleep(0.3)
+        bid = self.next_id
+        self.next_id += 1
+        sent_at = time.time() if send_batch(self.addr, bid, inputs, self.t0) else 0
+        self.inflight.append([bid, inputs, sent_at, 0])
 
 
 def cmd_demo(args):
@@ -202,13 +227,12 @@ def cmd_demo(args):
         for _ in range(args.skip):
             next(path)
     interval = args.batch / args.rate
-    sent_inputs = 0
     t0 = time.time()
+    pipe = Pipeline(addr, args.addr, batch_id, t0)
     next_at = time.time()
     while True:
         inputs = list(itertools.islice(path, args.batch))
-        batch_id = send_with_retry(addr, args.addr, batch_id, inputs, t0, sent_inputs + len(inputs))
-        sent_inputs += len(inputs)
+        pipe.push(inputs)
         next_at += interval
         delay = next_at - time.time()
         if delay > 0:
@@ -242,7 +266,7 @@ def main(argv=None):
     p = sub.add_parser("send"); p.add_argument("addr", nargs="?", default=default_addr); p.add_argument("--batch", type=int, required=True)
     p.add_argument("--inputs", required=True); p.set_defaults(fn=cmd_send)
     p = sub.add_parser("demo"); p.add_argument("addr", nargs="?", default=default_addr); p.add_argument("--rate", type=float, default=20.0, help="inputs per second")
-    p.add_argument("--batch", type=int, default=20, help="inputs per external (<= 40; keep externals <= ~2/s)"); p.add_argument("--max-queue", type=int, default=80)
+    p.add_argument("--batch", type=int, default=36, help="inputs per external (<= 39; keep externals <= ~2/s)"); p.add_argument("--max-queue", type=int, default=80)
     p.add_argument("--skip", type=int, default=0, help="skip this many inputs of the route (resume position)")
     p.add_argument("--no-reset", action="store_true", help="do not teleport the player to the start first"); p.set_defaults(fn=cmd_demo)
     p = sub.add_parser("reset"); p.add_argument("addr", nargs="?", default=default_addr); p.add_argument("--batch", type=int, required=True); p.set_defaults(fn=lambda a: print(send_reset(Address.parse(a.addr), a.batch)))

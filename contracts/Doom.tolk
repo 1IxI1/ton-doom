@@ -43,7 +43,7 @@ const SPEED_FWD = 8;              // map units per frame per input unit
 const SPEED_SIDE = 6;
 const SIN_PER_LEAF = 56;
 const SIN_BITS = 18;
-const MAX_INPUTS = 40;            // per external message (count:8 + 40 x 24 bits fit in one cell)
+const MAX_INPUTS = 39;            // per external message (op:32 batchId:32 count:8 + 39 x 24 bits fit in one cell)
 const GAS_BUDGET = 950000;        // hard stop for rendering work (leaves ~50k to pack, emit, save, continue)
 const GAS_NODE_MARGIN = 25000;    // a node/subsector visit may add this much before the next check
 // (the per-run column guard, 2600 gas per column, is baked into the generated seg drawers)
@@ -83,9 +83,10 @@ struct Storage {
     px: int32          // 16.16 fixed point map units
     py: int32
     angle: uint16      // 0..ANGLES-1
-    lastBatch: uint32  // highest batchId accepted so far (externals must carry a larger one)
+    lastBatch: uint32  // id of the last batch appended to the queue
     qpos: uint8        // inputs already consumed from the head queue cell
     queue: cell?       // FIFO of inputs: cells [count:8, count x (turn:int8 fwd:int8 side:int8)], ref0 = next
+    held: cell?        // batch lastBatch+2 that arrived before lastBatch+1 (reorder buffer of one batch)
     level: cell        // see tools/level_encode.py
 }
 
@@ -621,10 +622,13 @@ fun onExternalMessage(inBody: slice) {
     val op = body.loadUint(32);
     val batchId = body.loadUint(32);
     var st = Storage.load();
-    // strict ordering: exactly the next batch id. Out-of-order / duplicate externals are rejected before
-    // ACCEPT (free), and the sender re-sends them after the previous batch lands.
-    assert (batchId == st.lastBatch + 1) throw ERR_OLD_BATCH;
+    // ordering: batch lastBatch+1 is appended right away; lastBatch+2 may arrive first (same block, random
+    // order) and is held until lastBatch+1 lands. Anything else is rejected before ACCEPT (free) and the
+    // sender re-sends it later. This lets the sender keep two batches in flight.
+    val isNext = batchId == st.lastBatch + 1;
+    assert (isNext | ((batchId == st.lastBatch + 2) & (st.held == null))) throw ERR_OLD_BATCH;
     if (op == OP_RESET) {
+        assert (isNext) throw ERR_OLD_BATCH;
         // body: op:32 batchId:32 px:int32 py:int32 angle:uint16 (16.16 map units)
         val px = body.loadInt(32);
         val py = body.loadInt(32);
@@ -634,6 +638,7 @@ fun onExternalMessage(inBody: slice) {
         st.py = py;
         st.angle = angle & ANGLE_MASK;
         st.queue = null;
+        st.held = null;
         st.qpos = 0;
         st.lastBatch = batchId;
         st.save();
@@ -646,8 +651,18 @@ fun onExternalMessage(inBody: slice) {
 
     // enqueue the batch: [count:8, count x 24 bits]
     val batch = beginCell().storeUint(count, 8).storeSlice(body.getFirstBits(count * 24)).endCell();
+    if (!isNext) {
+        st.held = batch;      // lastBatch+2 before lastBatch+1: hold it
+        st.save();
+        return;
+    }
     st.queue = appendBatch(st.queue, batch);
     st.lastBatch = batchId;
+    if (st.held != null) {
+        st.queue = appendBatch(st.queue, st.held!);
+        st.held = null;
+        st.lastBatch = batchId + 1;
+    }
     st.save();
     commitContractDataAndActions();
     step(mutate st, 0);
