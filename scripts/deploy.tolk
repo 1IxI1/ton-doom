@@ -12,6 +12,11 @@ import "@acton/testing/assert"
 
 import "@contracts/Doom"
 
+// level root ref3 = assets: ref0 gun, ref1 monster sprites, ref2 initial monsters (tools/level_encode.py)
+fun initialMonsters(level: cell): cell {
+    return level.beginParse().refAt(3).beginParse().refAt(2);
+}
+
 fun main() {
     val walletName = env<string>("DOOM_WALLET") ?? "main-w9";
     val wallet = scripts.wallet(walletName);
@@ -29,7 +34,7 @@ fun main() {
     val stateInit: ContractState = {
         code: build("Doom"),
         // player 1 start of E1M1: (1056, -3616), facing north (90 deg = 128 angle units)
-        data: Storage { frameNo: salt, px: 1056 << 16, py: -3616 << 16, angle: 128, lastBatch: 0, qpos: 0, queue: null, held: null, owner: wallet.address, auto: false, turnDir: 0, rnd: 1, lastStep: 0, gun: 0, level: level! }.toCell(),
+        data: Storage { frameNo: salt, px: 1056 << 16, py: -3616 << 16, angle: 128, lastBatch: 0, qpos: 0, queue: null, held: null, owner: wallet.address, auto: false, turnDir: 0, rnd: 1, lastStep: 0, gun: 0, monsters: initialMonsters(level!), level: level! }.toCell(),
     };
     val addr = AutoDeployAddress { stateInit }.calculateAddress();
     println("doom address: {}", addr);

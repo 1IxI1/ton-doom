@@ -57,6 +57,7 @@
       px: s.loadInt(32), py: s.loadInt(32), angle: s.loadUint(16), viewz: s.loadInt(16),
       flags: s.loadUint(8), queued: s.loadUint(16),
     };
+    f.kills = s.remainingBits >= 8 ? s.loadUint(8) : null;   // targets killed so far (contracts with monsters)
     const cols = [];
     let c = s.loadRef();
     while (c && cols.length < f.w) {
@@ -151,7 +152,7 @@
       `pos        ${(f.px / 65536).toFixed(1)}, ${(f.py / 65536).toFixed(1)}  z=${f.viewz}\n` +
       `angle      ${(f.angle * 360 / 512).toFixed(1)} deg\n` +
       `tx gas     ${f.gas}\n` +
-      `on-chain q ${f.queued} inputs\n` +
+      `on-chain q ${f.queued} inputs${f.kills !== null ? `   kills ${f.kills}` : ''}\n` +
       `block time ${new Date(f.now * 1000).toLocaleTimeString()}  (latency ${stat.latency.toFixed(1)} s)\n` +
       `buffer     ${queue.length} frames, play ${stat.playFps.toFixed(1)} fps\n` +
       `received   ${stat.received} (dup ${stat.dup}), shown ${stat.shown}, partial ${stat.partial}` +
@@ -275,7 +276,9 @@
   // the shard and the queue (latency) grows; 10/s with doubled steps moves just as fast at half the gas.
   // Lost externals: the mempool sometimes never delivers a message (and rejects an identical resend as a
   // duplicate), so a resend carries a fresh nonce after the inputs (the contract ignores trailing bits).
-  const PLAY = { rate: 10, sendGapMs: 500, relayGapMs: 300, ackMs: 2000, maxBatch: 29, inFlight: 6, resendMs: 1500, resendEveryMs: 1000, maxResends: 1, holdMs: 1500, maxPending: 40, fireEvery: 4, tail: 2 };
+  // tail: idle inputs after the last key so the flash/bob settle; tailFire: a shot may start a target's
+  // death animation (20 frames), which only advances on rendered frames, so keep frames coming
+  const PLAY = { rate: 10, sendGapMs: 500, relayGapMs: 300, ackMs: 2000, maxBatch: 29, inFlight: 6, resendMs: 1500, resendEveryMs: 1000, maxResends: 1, holdMs: 1500, maxPending: 40, fireEvery: 4, tail: 2, tailFire: 24 };
   const stepMul = () => (PLAY.rate >= 20 ? 1 : 2);   // fwd/side units and turn per input
   const KEYMAP = { ArrowUp: 'fwd', KeyW: 'fwd', ArrowDown: 'back', KeyS: 'back', ArrowLeft: 'left', ArrowRight: 'right',
                    KeyA: 'sleft', KeyD: 'sright', Space: 'fire', ControlLeft: 'fire', ControlRight: 'fire', KeyF: 'fire' };
@@ -285,7 +288,7 @@
   const relays = Array.isArray(CFG.relays) ? CFG.relays : [];
   let relayIx = 0;
   const sendGap = () => (relays.length ? PLAY.relayGapMs : PLAY.sendGapMs);
-  const nextDest = () => (relays.length ? relays[relayIx++ % relays.length] : playAddr);
+  const nextRelay = () => (relays.length ? relays[relayIx++ % relays.length] : null);
   const pstat = { sentInputs: 0, batches: 0, resent: 0, rejected: 0, dropped: 0, lost: 0 };
 
   function onKey(e, down) {
@@ -303,7 +306,9 @@
     let fire = 0;
     if (fireEdge) { fire = 1; fireEdge = false; fireHold = PLAY.fireEvery; }
     else if (keys.has('fire') && --fireHold <= 0) { fire = 1; fireHold = PLAY.fireEvery; }
-    if (turn || fwd || side || fire) { tail = PLAY.tail; pending.push([turn, fwd, side, fire]); }
+    if (fire) tail = PLAY.tailFire;
+    else if (turn || fwd || side) tail = Math.max(tail, PLAY.tail);
+    if (turn || fwd || side || fire) { pending.push([turn, fwd, side, fire]); }
     else if (tail > 0) { tail--; pending.push([turn, fwd, side, fire]); }   // a few idle frames after the last key: lets the flash/bob settle
     if (pending.length > PLAY.maxPending) { pstat.dropped += pending.length - PLAY.maxPending; pending = pending.slice(-PLAY.maxPending); }   // stay responsive when the chain lags
     maybeSend();
@@ -328,12 +333,16 @@
     const r = await api('/api/v3/runGetMethod', { address: addr, method: 'lastBatch', stack: [] });
     return parseInt(r.stack[0].value, 16);
   }
-  function tickMessage(addr, id, inputs, nonce) {
-    const body = Boc.beginCell().storeUint(OP_TICK, 32).storeUint(id, 32).storeUint(inputs.length, 8);
+  // The command external: straight to the contract, or to a relay with the contract's address in front
+  // (contracts/Relay.tolk forwards the rest as an internal message to that address).
+  function tickMessage(doomAddr, relayAddr, id, inputs, nonce) {
+    const body = Boc.beginCell();
+    if (relayAddr) body.storeAddress(doomAddr);
+    body.storeUint(OP_TICK, 32).storeUint(id, 32).storeUint(inputs.length, 8);
     for (const [t, f, sd, fire] of inputs) body.storeInt(t, 8).storeInt(f, 8).storeInt(sd, 8).storeUint(fire, 8);
     if (nonce) body.storeUint(nonce, 32);   // resend: a different message hash gets a fresh broadcast
     // ext_in_msg_info$10 src:addr_none dest import_fee:0 init:no body:^Cell
-    return Boc.beginCell().storeUint(2, 2).storeUint(0, 2).storeAddress(addr).storeCoins(0).storeBit(0).storeBit(1).storeRef(body.endCell()).endCell();
+    return Boc.beginCell().storeUint(2, 2).storeUint(0, 2).storeAddress(relayAddr || doomAddr).storeCoins(0).storeBit(0).storeBit(1).storeRef(body.endCell()).endCell();
   }
   async function flush(addr) {
     sending = true;
@@ -341,7 +350,7 @@
     const id = lastAck + 1 + sent.length;   // consecutive ids after the last confirmed one
     let rec = null;
     try {
-      rec = { id, inputs, boc: Boc.toBase64(Boc.serialize(tickMessage(nextDest(), id, inputs, 0))), at: performance.now(), sentAt: performance.now(), tries: 1 };
+      rec = { id, inputs, boc: Boc.toBase64(Boc.serialize(tickMessage(addr, nextRelay(), id, inputs, 0))), at: performance.now(), sentAt: performance.now(), tries: 1 };
       sent.push(rec); lastSendAt = rec.at;
       await api('/api/v3/message', { boc: rec.boc }); pstat.batches++; pstat.sentInputs += inputs.length;
     } catch (e) {
@@ -391,7 +400,7 @@
     if (!r || sending || now - lastSendAt < sendGap() || r.tries > PLAY.maxResends) return;
     if (now - r.sentAt < PLAY.resendMs || now - r.at < PLAY.resendEveryMs) return;
     r.at = now; lastSendAt = now; r.tries++; pstat.resent++;
-    const boc = Boc.toBase64(Boc.serialize(tickMessage(nextDest(), r.id, r.inputs, (Math.random() * 0xffffffff) >>> 0)));
+    const boc = Boc.toBase64(Boc.serialize(tickMessage(playAddr, nextRelay(), r.id, r.inputs, (Math.random() * 0xffffffff) >>> 0)));
     api('/api/v3/message', { boc }).catch(e => { if (!/exit 132/.test(e.message)) log(`resend ${r.id}: ${e.message}`, 'warn'); });
   }
   function showPlayStats() {

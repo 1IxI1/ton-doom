@@ -262,6 +262,17 @@ class Renderer:
         # depth level 0 (near) .. 4 (far) -> pattern level
         self.wall_pats = [self.PAT[5], self.PAT[4], self.PAT[3], self.PAT[2], self.PAT[2]]
         self.stats = None
+        # shootable targets: set_monsters(list of monsters.Monster, sprites.monster_sprites(...))
+        self.monsters = None
+        self.sprites = None
+        self.monster_ss = {}
+        self.view_ss = -1
+
+    def set_monsters(self, monsters, sprites):
+        from monsters import monster_subsectors
+        self.monsters = monsters
+        self.sprites = sprites
+        self.monster_ss = monster_subsectors(self.level)
 
     # ---- helpers ------------------------------------------------------------ #
     def rowmask_top(self, n: int) -> int:
@@ -290,7 +301,8 @@ class Renderer:
         self.partial = False
         self.stats = {"nodes": 0, "bbox_tests": 0, "bbox_culled": 0, "subsectors": 0, "segs": 0,
                       "segs_backface": 0, "segs_offscreen": 0, "segs_occluded": 0, "segs_drawn": 0,
-                      "runs": 0, "col_events": 0} if stats else None
+                      "runs": 0, "col_events": 0, "sprites": 0} if stats else None
+        self.view_ss = self.level.point_in_subsector(px, py).idx if self.monsters is not None else -1
         self.render_node(self.level.root)
         return [c & self.FULL for c in self.fb]
 
@@ -361,9 +373,22 @@ class Renderer:
     def render_subsector(self, ss: Subsector):
         if self.stats is not None:
             self.stats["subsectors"] += 1
+        here = self.monster_ss.get(ss.idx) if self.monsters is not None else None
+        if here and ss.idx == self.view_ss:
+            self.draw_monsters(here)       # the viewer is inside: every seg of the subsector is behind them
         for seg in ss.segs:
             if seg.kind != SKIP:
                 self.add_seg(seg)
+        if here and ss.idx != self.view_ss:
+            self.draw_monsters(here)       # the subsector's front-facing segs are all in front of them
+
+    def draw_monsters(self, ids):
+        from monsters import draw_monster
+        # nearest first, so that a nearer sprite closes its rows before a farther one is drawn
+        order = sorted(ids, key=lambda i: self.to_view(self.monsters[i].x, self.monsters[i].y)[1])
+        for i in order:
+            if draw_monster(self, self.monsters[i], self.sprites) and self.stats is not None:
+                self.stats["sprites"] += 1
 
     def add_seg(self, seg: Seg):
         st = self.stats

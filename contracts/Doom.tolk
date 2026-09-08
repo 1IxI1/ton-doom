@@ -48,7 +48,8 @@ const MAX_INPUTS = 29;            // per external message (op:32 batchId:32 coun
 const MAX_BATCH_SKIP = 64;        // a batch id may run at most this far ahead of lastBatch (lost batches are skipped)
 const HELD_MAX = 3;               // reorder buffer: when a 4th batch is waiting, or the oldest waited HELD_MAX_AGE
 const HELD_MAX_AGE = 2;           // seconds, the batches before it are declared lost and skipped
-const GAS_BUDGET = 930000;        // hard stop for rendering work (leaves ~70k: weapon overlay ~18k, pack, emit, save, continue)
+const GAS_BUDGET = 900000;        // hard stop for rendering work (leaves ~100k: weapon overlay ~18k, pack, emit, save, continue)
+const GAS_PER_SPRITE_COL = 800;   // a target sprite column (Tolk loop in drawMonster)
 const GAS_NODE_MARGIN = 25000;    // a node/subsector visit may add this much before the next check
 // (the per-run column guard, 2600 gas per column and the same budget, is baked into the generated seg drawers:
 //  regenerate render-asm.tolk when GAS_BUDGET changes)
@@ -85,6 +86,26 @@ const AI_SIDE_ANGLE = ANGLES / 8;
 // entry) and fires now and then: a muzzle flash for GUN_FLASH_FRAMES frames when (rnd >> 20) & 63 == 0.
 const GUN_BOB_TABLE = 0x05AFFA50;   // [0,0,1,1,2,2,3,3,3,3,2,2,1,1,0,0]
 const GUN_FLASH_FRAMES = 2;
+
+// Shootable targets (tools/monsters.py): imps standing still; a shot hits the nearest living one within
+// MON_HIT_RADIUS of the view axis and not behind a wall. Sprites (tools/sprites.py monster_sprites) come in
+// MON_LEVELS scales; level k is used when the projected idle height (rows) >= (MON_LEVEL_MIN >> (8*k)) & 255.
+const MON_MAX = 6;
+const MON_REF_PX = 52;            // idle sprite height above the floor, px; projected rows = 52 * ASPECT_Y * FOCAL / depth
+const MON_MIN_DEPTH = 16;         // map units: nearer sprites are not drawn
+const MON_MIN_ROWS = 5;           // smaller projected sprites are not drawn
+// level by projected idle height (rows52, capped at 127): a nibble per value, two 256-bit tables
+const MON_LEVEL_LO = 0x6666666666666555555555555555544444444444333333332222211100000000;
+const MON_LEVEL_HI = 0x8888888888888888888888888888877777777777777777777777666666666666;
+const MON_HIT_RADIUS = 20;
+const MON_HIT_RANGE = 2048;
+const MON_PAIN_FRAMES = 4;
+const MON_DEATH_TICS = 4;         // frames per death animation frame
+const MON_DEATH_FRAMES = 5;       // sprite frames 2..6; 6 = the corpse
+const MON_IDLE = 0;
+const MON_PAIN = 1;
+const MON_DYING = 2;
+const MON_DEAD = 3;
 const BLOCK_SHIFT = 7;            // 128-unit blockmap cells (tools/blockmap.py)
 const BLOCK_TREE_DEPTH = 5;
 const CHAIN_STALE_SECONDS = 4;    // START re-kicks the chain if no frame was rendered for this long
@@ -117,6 +138,7 @@ struct Storage {
     rnd: uint32        // AI: LCG state
     lastStep: uint32   // unix time of the last rendered frame (chain liveness)
     gun: uint8         // muzzle flash frames left
+    monsters: cell     // targets: count:4 then per monster x:int16 y:int16 z:int16 hp:uint8 state:uint4 timer:uint8
     level: cell        // see tools/level_encode.py
 }
 
@@ -145,6 +167,7 @@ struct (0x4652414D) FrameEvent {   // "FRAM"
     viewz: int16
     flags: uint8       // bit 0: partial frame (gas budget hit before the BSP walk finished)
     queued: uint16     // inputs still queued after this frame
+    kills: uint8       // dead targets so far
     pixels: cell       // chain of cells, COLS_PER_CELL columns of H bits each, next cell in ref 0
 }
 
@@ -176,6 +199,12 @@ global gSolid: int;       // W-bit mask of fully closed columns
 global gPats: array<int>; // wall patterns: [lvl*2] even columns, [lvl*2+1] odd columns, lvl 0 (near) .. 4 (far)
 global gRows: array<int>; // gRows[n] = mask of the top n rows, n in 0..H
 global gPartial: bool;    // set when the gas budget stopped the BSP walk
+global gMonX: array<int>;   // targets for this frame (map units) ...
+global gMonY: array<int>;
+global gMonZ: array<int>;
+global gMonFrame: array<int>;   // ... and their sprite frame
+global gSprites: cell;    // monster sprite tree (tools/sprites.py encode_monster_sprites)
+global gViewSS: int;      // subsector index of the viewer
 
 const DEBUG = false;
 global gProfNodes: int;
@@ -186,6 +215,8 @@ global gProfGasCols: int;
 global gProfGasSegs: int;
 global gProfGasCulled: int;
 global gProfGasSetup: int;
+global gProfGasSprites: int;
+global gProfSprites: int;
 
 struct (0x50524F46) ProfEvent {   // "PROF"
     gasInit: uint32
@@ -200,11 +231,14 @@ struct (0x50524F46) ProfEvent {   // "PROF"
     segs: uint16
     segsDrawn: uint16
     cols: uint32
+    gasSprites: uint32
+    sprites: uint16
 }
 
 // ---------------------------------------------------------------------------------------------
 // Trig table
 // ---------------------------------------------------------------------------------------------
+@inline_ref
 fun sinAt(table: cell, a: int): int {
     val leaf = a / SIN_PER_LEAF;
     val off = (a - leaf * SIN_PER_LEAF) * SIN_BITS;
@@ -243,7 +277,8 @@ fun pointOnSide(px: int, py: int, nx: int, ny: int, ndx: int, ndy: int): int {
 }
 
 // floor height of the subsector containing (px, py), integer map units
-fun floorAt(root: cell, rootIsSS: bool, px: int, py: int): int {
+// Subsector cell header: ssIndex:12 nmon:4 (nmon x id:4) floor:int16 ceil:int16 nsegs:4 ...
+fun floorAt(root: cell, rootIsSS: bool, px: int, py: int): (int, int) {
     var c = root;
     var isSS = rootIsSS;
     while (!isSS) {
@@ -257,7 +292,11 @@ fun floorAt(root: cell, rootIsSS: bool, px: int, py: int): int {
         c = s.refAt(side);
         isSS = ((flags >> (side * 3)) & 1) == 1;
     }
-    return c.beginParse().preloadInt(16);
+    var h = c.beginParse();
+    val ssIndex = h.loadUint(12);
+    val nmon = h.loadUint(4);
+    h.skipBits(nmon * 4);
+    return (h.preloadInt(16), ssIndex);
 }
 
 // Doom R_CheckBBox in view space. bbox = (top, bottom, left, right) in map units.
@@ -352,6 +391,12 @@ fun renderNode(c: cell, isSS: bool, cam: Cam): void {
 @inline_ref
 fun renderSubsector(c: cell, cam: Cam): void {
     var s = c.beginParse();
+    val ssIndex = s.loadUint(12);
+    val nmon = s.loadUint(4);
+    if (nmon > 0) {
+        renderSubsectorTargets(s, ssIndex, nmon, cam);
+        return;
+    }
     s.skipBits(32);
     val n = s.loadUint(4);
     repeat (n) {
@@ -364,8 +409,187 @@ fun renderSubsector(c: cell, cam: Cam): void {
         }
     }
     if (s.remainingRefsCount() > 0) {
-        renderSubsector(s.loadRef(), cam);
+        renderSegs(s.loadRef().beginParse(), cam);
     }
+}
+
+// Seg records: floor ceil nsegs then the segs; ref0 = continuation cell with the same layout.
+@inline_ref
+fun renderSegs(cs: slice, cam: Cam): void {
+    var s = cs;
+    s.skipBits(32);
+    val n = s.loadUint(4);
+    repeat (n) {
+        if (DEBUG) {
+            val gasA = getGasConsumedAtTheMoment();
+            drawSeg(mutate s, cam);
+            gProfGasSegs += getGasConsumedAtTheMoment() - gasA;
+        } else {
+            drawSeg(mutate s, cam);
+        }
+    }
+    if (s.remainingRefsCount() > 0) {
+        renderSegs(s.loadRef().beginParse(), cam);
+    }
+}
+
+// A subsector with targets in it. The viewer inside: every seg of the subsector is behind the targets,
+// draw them first; otherwise its front-facing segs are all in front of them, draw them after the segs.
+@inline_ref
+fun renderSubsectorTargets(cs: slice, ssIndex: int, nmon: int, cam: Cam): void {
+    var s = cs;
+    val ids = s.loadUint(nmon * 4);
+    if (ssIndex == gViewSS) {
+        drawMonsters(ids, nmon, cam);
+        renderSegs(s, cam);
+    } else {
+        renderSegs(s, cam);
+        drawMonsters(ids, nmon, cam);
+    }
+}
+
+// Nearest first, so that a nearer sprite closes its rows before a farther one is drawn.
+@inline_ref
+fun drawMonsters(ids: int, nmon: int, cam: Cam): void {
+    if (nmon == 1) {
+        if (getGasConsumedAtTheMoment() > GAS_BUDGET - GAS_NODE_MARGIN) {
+            gPartial = true;
+            return;
+        }
+        drawMonster(ids, cam);
+        return;
+    }
+    var rest = ids;
+    var n = nmon;
+    while (n > 0) {
+        // pick the nearest of the remaining ids (n <= 3 in practice)
+        var bestId = -1;
+        var bestD = 1 << 62;
+        var bestPos = 0;
+        var i = 0;
+        var t = rest;
+        repeat (n) {
+            val id = t & 15;
+            t >>= 4;
+            val dx = (gMonX.get(id) << 16) - cam.px;
+            val dy = (gMonY.get(id) << 16) - cam.py;
+            val d = (dx * cam.cs + dy * cam.sn) >> 16;
+            if (d < bestD) {
+                bestD = d;
+                bestId = id;
+                bestPos = i;
+            }
+            i += 1;
+        }
+        // remove the chosen nibble
+        val lowMask = (1 << (bestPos * 4)) - 1;
+        rest = (rest & lowMask) | ((rest >> ((bestPos + 1) * 4)) << (bestPos * 4));
+        n -= 1;
+        if (getGasConsumedAtTheMoment() > GAS_BUDGET - GAS_NODE_MARGIN) {
+            gPartial = true;
+            return;
+        }
+        if (DEBUG) {
+            val gasM = getGasConsumedAtTheMoment();
+            drawMonster(bestId, cam);
+            gProfGasSprites += getGasConsumedAtTheMoment() - gasM;
+            gProfSprites += 1;
+        } else {
+            drawMonster(bestId, cam);
+        }
+    }
+}
+
+// refs 0..2 = items, ref 3 = the rest (tools/sprites.py encode_tree)
+@inline_ref
+fun treeAt(root: cell, index: int): cell {
+    var c = root;
+    var i = index;
+    while (i >= 3) {
+        c = c.beginParse().refAt(3);
+        i -= 3;
+    }
+    return c.beginParse().refAt(i);
+}
+
+// Mirrors tools/monsters.py draw_monster.
+@inline_ref
+fun drawMonster(id: int, cam: Cam): void {
+    val frame = gMonFrame.get(id);
+    val dx = (gMonX.get(id) << 16) - cam.px;
+    val dy = (gMonY.get(id) << 16) - cam.py;
+    val sv = (dx * cam.sn - dy * cam.cs) >> 16;
+    val d = (dx * cam.cs + dy * cam.sn) >> 16;
+    if (d < (MON_MIN_DEPTH << 16)) {
+        return;
+    }
+    val rows52 = (MON_REF_PX * ASPECT_Y * (FOCAL << 16)) / d;
+    if (rows52 < MON_MIN_ROWS) {
+        return;
+    }
+    val r127 = min(rows52, 127);
+    val level = r127 < 64 ? (MON_LEVEL_LO >> (4 * r127)) & 15 : (MON_LEVEL_HI >> (4 * (r127 - 64))) & 15;
+    val xc = project(sv, d);
+    val scale24 = (FOCAL << 40) / d;
+    val worldbottom = (gMonZ.get(id) - cam.vz) * ASPECT_Y;
+    val bot = ((CY << 24) - worldbottom * scale24) >> 24;   // screen row of the feet
+    var mip = treeAt(treeAt(gSprites, frame), level).beginParse();
+    val rows = mip.loadUint(8);
+    val cols = mip.loadUint(8);
+    val xoff = mip.loadUint(8);
+    if ((bot < 0) | (bot - rows + 1 >= H)) {
+        return;
+    }
+    // only the on-screen columns: skip the leading off-screen ones in the chain, stop at the right edge
+    val x0 = xc - xoff;
+    val skip = x0 < 0 ? -x0 : 0;
+    val count = min(cols, W - x0) - skip;
+    if (count <= 0) {
+        return;
+    }
+    if (getGasConsumedAtTheMoment() + count * GAS_PER_SPRITE_COL > GAS_BUDGET - GAS_NODE_MARGIN) {
+        gPartial = true;   // not enough budget left for this sprite
+        return;
+    }
+    var chain = mip.loadRef().beginParse();
+    val perCell = 1023 / (2 * rows);
+    val cellSkip = skip / perCell;
+    repeat (cellSkip) {
+        chain = chain.preloadRef().beginParse();
+    }
+    chain.skipBits((skip - cellSkip * perCell) * 2 * rows);
+    var fb = gFb;
+    var x = x0 + skip;
+    // per column (pixels are a subset of the mask, and pixel bits of open rows are 0):
+    //   drawn = mask' & open; e += pix' & open; e -= drawn << H   (' = shifted to the feet row)
+    val sh = H - 1 - bot;
+    if (sh >= 0) {
+        repeat (count) {
+            if (chain.remainingBitsCount() == 0) {
+                chain = chain.loadRef().beginParse();
+            }
+            val pix = chain.loadUint(rows);
+            val mask = chain.loadUint(rows);
+            val e = fb.get(x);
+            val open = e >> H;
+            fb.set(e + ((pix << sh) & open) - (((mask << sh) & open) << H), x);
+            x += 1;
+        }
+    } else {
+        val rs = -sh;   // feet below the screen bottom: the sprite is shifted down
+        repeat (count) {
+            if (chain.remainingBitsCount() == 0) {
+                chain = chain.loadRef().beginParse();
+            }
+            val pix = chain.loadUint(rows);
+            val mask = chain.loadUint(rows);
+            val e = fb.get(x);
+            val open = e >> H;
+            fb.set(e + ((pix >> rs) & open) - (((mask >> rs) & open) << H), x);
+            x += 1;
+        }
+    }
+    gFb = fb;
 }
 
 // Reads one seg record from `s` and draws it. Transform / clipping / projection here (early exits for
@@ -478,6 +702,7 @@ fun drawSeg(mutate s: slice, cam: Cam): void {
 // Move (px,py) -> (nx,ny) in 16.16; true if it crosses a line that blocks in that direction.
 // Does the move (px,py) -> (nx,ny) cross a blocking line? Returns the direction (dx, dy) of the first such
 // line in blockmap order, or (0, 0) if the move is free.
+@inline_ref
 fun hitLine(bm: cell, px: int, py: int, nx: int, ny: int): (int, int) {
     var h = bm.beginParse();
     val ox = h.loadInt(16);
@@ -636,7 +861,7 @@ fun renderFrame(root: cell, rootIsSS: bool, cam: Cam, gun: cell, flash: bool, bo
     }
     gRows = rows;
     gPats = [PAT_L5_0, PAT_L5_1, PAT_L4_0, PAT_L4_1, PAT_L3_0, PAT_L3_1, PAT_L2_0, PAT_L2_1, PAT_L2_0, PAT_L2_1];
-    if (DEBUG) { gProfNodes = 0; gProfSegs = 0; gProfSegsDrawn = 0; gProfCols = 0; gProfGasCols = 0; gProfGasSegs = 0; gProfGasCulled = 0; gProfGasSetup = 0; }
+    if (DEBUG) { gProfNodes = 0; gProfSegs = 0; gProfSegsDrawn = 0; gProfCols = 0; gProfGasCols = 0; gProfGasSegs = 0; gProfGasCulled = 0; gProfGasSetup = 0; gProfGasSprites = 0; gProfSprites = 0; }
     val gas1 = getGasConsumedAtTheMoment();
     renderNode(root, rootIsSS, cam);
     overlayGun(gun, flash, bob);
@@ -667,6 +892,7 @@ fun renderFrame(root: cell, rootIsSS: bool, cam: Cam, gun: cell, flash: bool, bo
                 gasInit: gas1 - gas0, gasBsp: gas2 - gas1, gasPack: gas3 - gas2, gasTotal: gas3,
                 gasCols: gProfGasCols, gasSegs: gProfGasSegs, gasCulled: gProfGasCulled, gasSetup: gProfGasSetup,
                 nodes: gProfNodes, segs: gProfSegs, segsDrawn: gProfSegsDrawn, cols: gProfCols,
+                gasSprites: gProfGasSprites, sprites: gProfSprites,
             },
         });
         prof.send(SEND_MODE_REGULAR);
@@ -674,7 +900,7 @@ fun renderFrame(root: cell, rootIsSS: bool, cam: Cam, gun: cell, flash: bool, bo
     return next!;
 }
 
-fun emitFrame(st: Storage, viewz: int, pixels: cell, queued: int) {
+fun emitFrame(st: Storage, viewz: int, pixels: cell, queued: int, kills: int) {
     val msg = createExternalLogMessage({
         dest: createAddressNone(),
         body: FrameEvent {
@@ -687,6 +913,7 @@ fun emitFrame(st: Storage, viewz: int, pixels: cell, queued: int) {
             viewz: viewz,
             flags: gPartial ? 1 : 0,
             queued: queued,
+            kills: kills,
             pixels: pixels,
         },
     });
@@ -800,6 +1027,90 @@ fun popInput(mutate st: Storage): (int, int, int, bool, bool) {
     return (turn, fwd, side, fire, true);
 }
 
+// ---------------------------------------------------------------------------------------------
+// Targets (mirrors tools/monsters.py)
+// ---------------------------------------------------------------------------------------------
+// Loads the monsters into the frame globals, applies one animation tick and (if `shot`) a shot along the
+// view axis. Returns (updated monsters cell, kills).
+fun updateMonsters(monsters: cell, shot: bool, bm: cell, px: int, py: int, sn: int, cs: int): (cell, int) {
+    var s = monsters.beginParse();
+    val n = s.loadUint(4);
+    var xs: array<int> = [];
+    var ys: array<int> = [];
+    var zs: array<int> = [];
+    var hps: array<int> = [];
+    var states: array<int> = [];
+    var timers: array<int> = [];
+    repeat (n) {
+        xs.push(s.loadInt(16));
+        ys.push(s.loadInt(16));
+        zs.push(s.loadInt(16));
+        hps.push(s.loadUint(8));
+        states.push(s.loadUint(4));
+        timers.push(s.loadUint(8));
+    }
+    if (shot) {
+        var best = -1;
+        var bestD = MON_HIT_RANGE << 16;
+        var i = 0;
+        repeat (n) {
+            if (states.get(i) <= MON_PAIN) {
+                val dx = (xs.get(i) << 16) - px;
+                val dy = (ys.get(i) << 16) - py;
+                val sv = (dx * sn - dy * cs) >> 16;
+                val d = (dx * cs + dy * sn) >> 16;
+                if ((d > 0) & (abs(sv) <= (MON_HIT_RADIUS << 16)) & (d < bestD)) {
+                    best = i;
+                    bestD = d;
+                }
+            }
+            i += 1;
+        }
+        if ((best >= 0) && !blocked(bm, px, py, xs.get(best) << 16, ys.get(best) << 16)) {
+            val hp = hps.get(best) - 1;
+            hps.set(hp, best);
+            if (hp == 0) {
+                states.set(MON_DYING, best);
+                timers.set(0, best);
+            } else {
+                states.set(MON_PAIN, best);
+                timers.set(MON_PAIN_FRAMES, best);
+            }
+        }
+    }
+    var frames: array<int> = [];
+    var kills = 0;
+    var b = beginCell().storeUint(n, 4);
+    var i = 0;
+    repeat (n) {
+        var state = states.get(i);
+        var timer = timers.get(i);
+        if (state == MON_PAIN) {
+            timer -= 1;
+            if (timer == 0) {
+                state = MON_IDLE;
+            }
+        } else if (state == MON_DYING) {
+            timer += 1;
+            if (timer >= MON_DEATH_TICS * MON_DEATH_FRAMES) {
+                state = MON_DEAD;
+                timer = 0;
+            }
+        }
+        frames.push(state == MON_IDLE ? 0 : (state == MON_PAIN ? 1 : (state == MON_DYING ? 2 + timer / MON_DEATH_TICS : 6)));
+        if (state == MON_DEAD) {
+            kills += 1;
+        }
+        b.storeInt(xs.get(i), 16).storeInt(ys.get(i), 16).storeInt(zs.get(i), 16).storeUint(hps.get(i), 8).storeUint(state, 4).storeUint(timer, 8);
+        i += 1;
+    }
+    gMonX = xs;
+    gMonY = ys;
+    gMonZ = zs;
+    gMonFrame = frames;
+    return (b.endCell(), kills);
+}
+
 // Render one input (queued, or produced by the AI when the queue is empty and auto is on) and keep the
 // chain going while there is more to do.
 fun step(mutate st: Storage, hop: int) {
@@ -808,7 +1119,9 @@ fun step(mutate st: Storage, hop: int) {
     val root = lvl.loadRef();
     val sinTable = lvl.loadRef();
     val blockmap = lvl.loadRef();
-    val gun = lvl.loadRef();
+    var assets = lvl.loadRef().beginParse();
+    val gun = assets.loadRef();
+    gSprites = assets.loadRef();
     var (turn, fwd, side, fire, found) = popInput(mutate st);
     if (!found & !st.auto) {
         return;
@@ -855,12 +1168,17 @@ fun step(mutate st: Storage, hop: int) {
     st.angle = angle;
     st.px = px;
     st.py = py;
-    val viewz = floorAt(root, rootIsSS, px, py) + VIEWHEIGHT;
+    // a shot (this frame's flash) may hit a target; then the targets animate one frame
+    var kills = 0;
+    (st.monsters, kills) = updateMonsters(st.monsters, st.gun == GUN_FLASH_FRAMES, blockmap, px, py, sn, cs);
+    val (floor, viewSS) = floorAt(root, rootIsSS, px, py);
+    val viewz = floor + VIEWHEIGHT;
+    gViewSS = viewSS;
     val cam: Cam = { px, py, sn, cs, vz: viewz };
     val bob = moving ? (GUN_BOB_TABLE >> ((st.frameNo & 15) * 2)) & 3 : 0;
     val pixels = renderFrame(root, rootIsSS, cam, gun, st.gun > 0, bob);
     val queued = queuedCount(st.queue, st.qpos);
-    emitFrame(st, viewz, pixels, queued);
+    emitFrame(st, viewz, pixels, queued, kills);
     st.lastStep = blockchain.now();
     if (((queued > 0) | st.auto) & (contract.getOriginalBalance() > MIN_CHAIN_BALANCE)) {
         sendContinue(hop + 1);
@@ -1018,13 +1336,14 @@ fun handleCommand(inBody: slice, isExternal: bool) {
         st.queue = appendBatch(st.queue, batch);
         st.lastBatch = batchId;
     } else {
-        val (held, dup) = heldInsert(st.held, batchId, now, batch);
-        if (dup) {   // already waiting (a resend)
-            assert (!isExternal) throw ERR_OLD_BATCH;
-            return;
-        }
+        // accept before touching the reorder buffer: rebuilding it does not fit the pre-accept gas credit
+        // (a duplicate of a waiting batch, i.e. a resend, is therefore paid for, but changes nothing)
         if (isExternal) {
             acceptExternalMessage();
+        }
+        val (held, dup) = heldInsert(st.held, batchId, now, batch);
+        if (dup) {
+            return;
         }
         st.held = held;
     }
@@ -1061,6 +1380,26 @@ get fun lastBatch(): int {
 get fun autoState(): (int, int, int) {
     val st = Storage.load();
     return (st.auto ? 1 : 0, st.turnDir, st.lastStep);
+}
+
+// (dead, alive, count)
+get fun targets(): (int, int, int) {
+    val st = lazy Storage.load();
+    var s = st.monsters.beginParse();
+    val n = s.loadUint(4);
+    var dead = 0;
+    var alive = 0;
+    repeat (n) {
+        s.skipBits(56);
+        val state = s.loadUint(4);
+        s.skipBits(8);
+        if (state == MON_DEAD) {
+            dead += 1;
+        } else if (state <= MON_PAIN) {
+            alive += 1;
+        }
+    }
+    return (dead, alive, n);
 }
 
 get fun screen(): (int, int) {

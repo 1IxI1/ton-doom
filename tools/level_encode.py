@@ -8,7 +8,8 @@ Layout (must match contracts/Doom.tolk):
       ref0: BSP root (node cell or subsector cell)
       ref1: sin table root
       ref2: blockmap (see tools/blockmap.py)
-      ref3: weapon sprite (see tools/sprites.py)
+      ref3: assets: ref0 weapon sprite, ref1 monster sprites (see tools/sprites.py),
+                    ref2 initial monsters (see tools/monsters.py)
 
   node cell:
       bits: d1:3 d0:3 x:int16 y:int16 dx:int16 dy:int16   (d_s = (flags6 >> (3*s)) & 7)
@@ -18,7 +19,8 @@ Layout (must match contracts/Doom.tolk):
       ref0: child0 (right / front), ref1: child1 (left / back)
 
   subsector cell:
-      bits: floor:int16 ceil:int16 nsegs:uint4, then nsegs seg records:
+      bits: ssIndex:uint12 nmon:uint4 (nmon x monsterId:uint4)   -- first cell only (see tools/monsters.py)
+            floor:int16 ceil:int16 nsegs:uint4, then nsegs seg records:
             kind:uint2 (0 solid, 1 upper wall only, 2 lower only, 3 both)
             x1:int16 y1:int16 x2:int16 y2:int16 ffloor:int16 fceil:int16
             lightAdj:int2 bfloor:int16 bceil:int16                            = 132 bits each
@@ -36,7 +38,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from blockmap import Blockmap, encode_blockmap  # noqa: E402
-from sprites import encode_gun  # noqa: E402
+from monsters import encode_monsters, initial_monsters, monster_subsectors  # noqa: E402
+from sprites import encode_gun, encode_monster_sprites  # noqa: E402
 from boc import Cell, begin_cell  # noqa: E402
 from render import ANGLES, SIN, SKIP, Level, Seg  # noqa: E402
 
@@ -54,12 +57,17 @@ def encode_seg(b, seg: Seg):
     b.store_int(seg.bfloor, 16).store_int(seg.bceil, 16)
 
 
-def encode_subsector(ss) -> Cell:
+def encode_subsector(ss, monster_ids=()) -> Cell:
     segs = [s for s in ss.segs if s.kind != SKIP]
     chunks = [segs[i : i + SEGS_PER_CELL] for i in range(0, len(segs), SEGS_PER_CELL)] or [[]]
     nxt = None
-    for chunk in reversed(chunks):
-        b = begin_cell().store_int(ss.floor, 16).store_int(ss.ceil, 16).store_uint(len(chunk), 4)
+    for ci, chunk in reversed(list(enumerate(chunks))):
+        b = begin_cell()
+        if ci == 0:
+            b.store_uint(ss.idx, 12).store_uint(len(monster_ids), 4)
+            for mid in monster_ids:
+                b.store_uint(mid, 4)
+        b.store_int(ss.floor, 16).store_int(ss.ceil, 16).store_uint(len(chunk), 4)
         for s in chunk:
             encode_seg(b, s)
         if nxt is not None:
@@ -98,7 +106,8 @@ def encode_child(level: Level, is_ss: bool, idx: int, cache) -> Cell:
     key = (is_ss, idx)
     if key in cache:
         return cache[key]
-    c = encode_subsector(level.subsectors[idx]) if is_ss else encode_node(level, level.nodes[idx], cache)
+    c = (encode_subsector(level.subsectors[idx], cache["monster_ss"].get(idx, ())) if is_ss
+         else encode_node(level, level.nodes[idx], cache))
     cache[key] = c
     return c
 
@@ -124,13 +133,14 @@ def encode_sin_table() -> Cell:
 
 
 def encode_level(level: Level, data: dict, wad_path: str, W: int, H: int) -> Cell:
-    cache = {}
+    cache = {"monster_ss": monster_subsectors(level)}
     is_ss, idx = level.root
     root_child = encode_child(level, is_ss, idx, cache)
     bm = encode_blockmap(Blockmap(data))
-    gun = encode_gun(wad_path, W, H)
+    assets = (begin_cell().store_ref(encode_gun(wad_path, W, H)).store_ref(encode_monster_sprites(wad_path, 2))
+              .store_ref(encode_monsters(initial_monsters(level))).end_cell())
     return (begin_cell().store_uint(1 if is_ss else 0, 1).store_ref(root_child).store_ref(encode_sin_table())
-            .store_ref(bm).store_ref(gun).end_cell())
+            .store_ref(bm).store_ref(assets).end_cell())
 
 
 def count_cells(c: Cell, seen=None) -> int:

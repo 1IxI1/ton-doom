@@ -1,6 +1,7 @@
-// Deploy N input relays for a Doom contract, all with the same top address bits as the Doom contract
-// (so that a shard split keeps them together), and print them (RELAY n id addr lines; put the addresses into
-// .env as DOOM_RELAYS=a,b,c: `... | awk '/^RELAY/{print $NF}' | paste -sd, -`).
+// Deploy N input relays (contracts/Relay.tolk: they forward to any address named in the message) with the
+// same top address bits as the Doom contract (so that a shard split keeps them together), and print them
+// (RELAY n id addr lines; put the addresses into .env as DOOM_RELAYS=a,b,c:
+// `... | awk '/^RELAY/{for(i=1;i<=NF;i++) if ($i ~ /^kQ/) print $i}' | paste -sd, -`).
 //   DOOM_ADDRESS=... RELAY_COUNT=50 RELAY_GRAMS=100 acton script scripts/deploy-relays.tolk --net testnet
 import "@acton/io"
 import "@acton/env"
@@ -30,7 +31,7 @@ fun main() {
     var found = 0;
     var id = 0;
     while (found < count) {
-        val stateInit: ContractState = { code, data: RelayStorage { doom, owner: wallet.address, id }.toCell() };
+        val stateInit: ContractState = { code, data: RelayStorage { owner: wallet.address, id }.toCell() };
         val addr = AutoDeployAddress { stateInit }.calculateAddress();
         val (_, h) = addr.getWorkchainAndHash();
         if ((h >> (256 - PREFIX_BITS)) == wantPrefix) {

@@ -14,6 +14,7 @@ Usage: python3 tools/sprites.py assets/doom1.wad --W 80 --H 120 --png gun.png
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import struct
 import sys
@@ -152,13 +153,142 @@ def overlay(columns, sprite_cols: dict, H: int, bob: int = 0):
     return columns
 
 
+# ---- monsters -------------------------------------------------------------------------------- #
+# An imp (TROO) as a shootable target: idle, pain, five death frames. Sprites are stored at fixed scales
+# (mip levels): level k has MIP_SCALE[k] screen rows per sprite pixel (vertical); horizontally a column is
+# ASPECT_Y rows worth, so columns per pixel = rows per pixel / ASPECT_Y. The contract picks the level whose
+# rows-per-pixel is nearest to the projected one (FOCAL * ASPECT_Y / depth) and places the picture with its
+# origin row (the feet) on the floor row of that depth.
+MONSTER_FRAMES = ["TROOA1", "TROOG1", "TROOI0", "TROOJ0", "TROOK0", "TROOL0", "TROOM0"]
+MONSTER_REF_PX = 52                                   # idle frame height above the floor, px (TROOA1 top offset)
+MIP_ROWS = [6, 9, 13, 19, 28, 42, 62, 92, 120]        # idle frame height in rows at each level
+MIP_SCALE = [r / MONSTER_REF_PX for r in MIP_ROWS]    # rows per sprite pixel
+MONSTER_THRESHOLD = 50
+
+
+def scale_picture(pic, pal, rows_per_px: float, aspect_y: int, threshold: int):
+    """One mip of a picture: rows cover heights 0..topoffset px above the origin (feet), columns cover the
+    picture width about the origin column. Returns (rows, cols, xoff, [(pix, mask)] per column), bit
+    (rows-1-r) = row r (top first). A 1-pixel black outline (mask only) surrounds the silhouette."""
+    width, height, left, top, img = pic
+    cols_per_px = rows_per_px / aspect_y
+    rows = max(1, round(top * rows_per_px))
+    c0 = math.floor(-left * cols_per_px)
+    c1 = math.ceil((width - left) * cols_per_px)
+    cols = c1 - c0
+    xoff = -c0
+    cells = {}
+    for c in range(cols):
+        pix = 0
+        mask = 0
+        xs0 = (c + c0) / cols_per_px + left
+        xs1 = (c + c0 + 1) / cols_per_px + left
+        for r in range(rows):
+            # row r covers heights (rows-1-r)/rows_per_px .. (rows-r)/rows_per_px above the feet
+            h0 = (rows - 1 - r) / rows_per_px
+            h1 = (rows - r) / rows_per_px
+            y0, y1 = top - h1, top - h0      # picture rows (y down)
+            n = hit = lum = 0
+            for y in range(max(0, math.floor(y0)), min(height, math.ceil(y1))):
+                for x in range(max(0, math.floor(xs0)), min(width, math.ceil(xs1))):
+                    n += 1
+                    cidx = img[y][x]
+                    if cidx is not None:
+                        hit += 1
+                        lum += luminance(pal, cidx)
+            if n and hit * 2 > n:
+                mean = lum // hit
+                thr = threshold + (BAYER2[r & 1][c & 1] - 1) * 24
+                mask |= 1 << (rows - 1 - r)
+                if mean > thr:
+                    pix |= 1 << (rows - 1 - r)
+        cells[c] = (pix, mask)
+    # black outline: mask grows by one pixel around the silhouette, pixels stay dark there
+    full = (1 << rows) - 1
+    out = []
+    for c in range(cols):
+        m = cells[c][1]
+        ring = ((m << 1) | (m >> 1) | (cells[c - 1][1] if c > 0 else 0) | (cells[c + 1][1] if c + 1 < cols else 0)) & full
+        out.append((cells[c][0], m | ring))
+    return rows, cols, xoff, out
+
+
+def monster_sprites(wad_path: str, aspect_y: int = 2):
+    """[frame][level] -> (rows, cols, xoff, columns)."""
+    w = WAD.open(wad_path)
+    pal = w.lump_data(w.find("PLAYPAL"))[:768]
+    frames = []
+    for name in MONSTER_FRAMES:
+        pic = read_picture(w, name)
+        frames.append([scale_picture(pic, pal, sc, aspect_y, MONSTER_THRESHOLD) for sc in MIP_SCALE])
+    return frames
+
+
+def encode_mip(mip) -> Cell:
+    rows, cols, xoff, columns = mip
+    per_cell = max(1, 1023 // (2 * rows))
+    chunks = [columns[i : i + per_cell] for i in range(0, len(columns), per_cell)] or [[]]
+    nxt = None
+    for chunk in reversed(chunks):
+        b = begin_cell()
+        for pix, mask in chunk:
+            b.store_uint(pix, rows).store_uint(mask, rows)
+        if nxt is not None:
+            b.store_ref(nxt)
+        nxt = b.end_cell()
+    return begin_cell().store_uint(rows, 8).store_uint(cols, 8).store_uint(xoff, 8).store_ref(nxt).end_cell()
+
+
+def encode_tree(cells: list) -> Cell:
+    """Pack a list of cells into a 4-ary chain: refs 0..2 = items, ref 3 = the rest (see Doom.tolk treeAt)."""
+    b = begin_cell()
+    for c in cells[:3]:
+        b.store_ref(c)
+    if len(cells) > 3:
+        b.store_ref(encode_tree(cells[3:]))
+    return b.end_cell()
+
+
+def encode_monster_sprites(wad_path: str, aspect_y: int = 2) -> Cell:
+    """Cell tree: frames -> levels -> mip cells (rows:8 cols:8 xoff:8, ref0 = columns chain)."""
+    frames = monster_sprites(wad_path, aspect_y)
+    return encode_tree([encode_tree([encode_mip(m) for m in levels]) for levels in frames])
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("wad")
     ap.add_argument("--W", type=int, default=80)
     ap.add_argument("--H", type=int, default=120)
     ap.add_argument("--png")
+    ap.add_argument("--monsters-png", help="preview of the monster frames at a few mip levels")
     args = ap.parse_args(argv)
+    if args.monsters_png:
+        from png import write_png
+        frames = monster_sprites(args.wad, 2)
+        levels = [8, 6, 4, 2]
+        S = 6
+        tiles = [(f, k) for k in levels for f in range(len(frames))]
+        cellw = max(frames[f][k][1] for f, k in tiles) * S + 8
+        cellh = max(frames[f][k][0] for f, k in tiles) * (S // 2) + 8
+        img_w = cellw * len(frames)
+        img_h = cellh * len(levels)
+        rowsb = [bytearray([100]) * img_w for _ in range(img_h)]
+        for li, k in enumerate(levels):
+            for f in range(len(frames)):
+                rows, cols, xoff, columns = frames[f][k]
+                ox, oy = f * cellw + 4, li * cellh + 4
+                for c in range(cols):
+                    pix, mask = columns[c]
+                    for r in range(rows):
+                        if (mask >> (rows - 1 - r)) & 1:
+                            v = 235 if (pix >> (rows - 1 - r)) & 1 else 0
+                            for dy in range(S // 2):
+                                rowsb[oy + r * (S // 2) + dy][ox + c * S : ox + c * S + S] = bytes([v]) * S
+        write_png(args.monsters_png, img_w, img_h, rowsb)
+        total = sum(len(m[3]) for fr in frames for m in fr)
+        print("frames", len(frames), "levels", len(MIP_ROWS), "columns total", total, "wrote", args.monsters_png)
+        return 0
     x0, w, idle, flash = gun_sprites(args.wad, args.W, args.H)
     print(f"gun columns {x0}..{x0 + w - 1} ({w} wide); idle cols {len(idle)}, flash cols {len(flash)}")
     for name, cols in (("idle", idle), ("flash", flash)):

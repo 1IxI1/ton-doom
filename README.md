@@ -41,13 +41,14 @@ Every transaction there is one rendered frame.
   renders and emits the frame, then sends itself a `CONT` message if the queue is not empty. Frames
   therefore continue across blocks at up to the block gas limit (~10 frames per 0.4 s block).
 * **Input relays** (`contracts/Relay.tolk`): the mempool caps pending external messages per address and
-  sometimes never delivers one, which made a player's input stream stall. A relay accepts the same command
-  as an external and forwards it to the Doom contract as an internal message (same block, no extra
-  latency); the same commands are accepted by the Doom contract from internal messages. The viewer sends
+  sometimes never delivers one, which made a player's input stream stall. A relay takes an external
+  `dest:address` + command and forwards the command to that address as an internal message (same block,
+  no extra latency); the Doom contract accepts the same commands from internal messages. The viewer sends
   batches to 50 relays in turn (`scripts/deploy-relays.tolk` deploys them with the same top address bits
-  as the Doom contract, so a shard split keeps them together).
-* A gas guard keeps every transaction under 1M gas: when the budget is hit, the frame is emitted partial
-  (`flags & 1`) instead of failing.
+  as the Doom contract, so a shard split keeps them together). Testnet toy: any destination, no signature.
+* A gas guard keeps every transaction under 1M gas: when the budget (900k for rendering) is hit, the frame
+  is emitted partial (`flags & 1`, far walls or sprites missing) instead of failing. Busy hangar views with
+  several targets in sight are partial about a quarter of the time.
 * **Wanderer AI on-chain** (`STRT` / `STOP` externals): when the input queue is empty the contract drives
   the player itself — three probes (ahead, ±45°) against a Doom-style blockmap of blocking lines, turning on
   the spot when blocked, steering away from walls while walking, a little random drift (LCG in state). The
@@ -55,7 +56,13 @@ Every transaction there is one rendered frame.
   0.4 TON. `tools/ai.py` + `tools/blockmap.py` are the bit-exact reference.
 * **Pistol**: the weapon sprite (PISGA0 + muzzle flash PISFA0 from the WAD, downscaled and dithered by
   `tools/sprites.py`, stored in the level cell) is composited over every frame on-chain; it bobs while
-  walking and fires now and then (a two-frame flash when the state LCG hits 1/64). No ammo, no damage.
+  walking and fires now and then (a two-frame flash when the state LCG hits 1/64). No ammo.
+* **Targets** (`tools/monsters.py`): six imps stand in the hangar. A shot hits the nearest living one within
+  20 map units of the view axis and not behind a wall; six hits kill it (pain frame, five death frames,
+  the corpse stays). Sprites (TROO from the WAD, 7 frames x 9 scales, dithered with a black outline) are
+  drawn *inside* the BSP walk when their subsector is visited: front to back, into the still-open rows of
+  their columns, so nearer walls hide them and they hide farther walls without a depth buffer. About 6k gas
+  per visible sprite plus ~0.7k per column; sprites are skipped when the gas budget runs low.
 * `tools/render.py` — the reference renderer in Python, bit-exact with the contract (the tests compare
   frame hashes). `tools/golden.py` builds golden frames, `tools/level_encode.py` packs E1M1 into cells,
   `tools/wad.py` parses the WAD, `tools/boc.py` is a dependency-free BOC/cell library.
@@ -76,6 +83,7 @@ Every transaction there is one rendered frame.
 acton build && acton test                  # emulator: golden-frame tests, gas numbers
 acton script scripts/deploy.tolk --net testnet     # deploy (wallet main-w9), prints DOOM_ADDRESS
 acton script scripts/topup.tolk --net testnet <addr> 50000      # top up; scripts/withdraw.tolk takes it back
+DOOM_ADDRESS=<addr> RELAY_COUNT=50 RELAY_GRAMS=100 acton script scripts/deploy-relays.tolk --net testnet   # play mode relays
 python3 tools/doom.py start                        # let the on-chain AI run (stop: doom.py stop)
 python3 tools/doom.py demo --rate 25 --batch 29   # feed the scripted E1M1 walk (address from .env)
 python3 tools/viewer_config.py && open viewer/index.html   # viewer config (address, key) from .env

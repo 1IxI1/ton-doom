@@ -56,7 +56,8 @@
 <p id="about-play" hidden><b>You are playing.</b> Every key sample (20 per second) becomes a 4-byte input
 <code>turn fwd strafe fire</code>; the page packs up to 29 of them into one external message every 0.5 s and
 sends it to the contract through toncenter. The contract moves the player (blockmap collisions, sliding along
-walls), renders the frame and emits it; what you see is read back from testnet.</p>
+walls), renders the frame and emits it; what you see is read back from testnet. Six imps stand in the hangar:
+six pistol hits each (they do not fight back).</p>
 <p id="about">Nobody is playing: the player is an <b>on-chain AI</b>. The contract itself decides every step
 (probes the level's blockmap, turns away from walls, shoots now and then) and renders every frame inside the TVM;
 the viewer only reads the frames back from testnet.

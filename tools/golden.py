@@ -26,6 +26,8 @@ PATHS = {
     "still": [(0, 0, 0, 1), (0, 0, 0, 0), (0, 0, 0, 0)],
     # into the wall west of the start (facing 180 deg): the last steps slide / stop instead of passing through
     "wall": [(-128, 0, 0, 0)] + [(0, 1, 0, 0)] * 26 + [(-24, 1, 0, 0)] * 4 + [(0, 1, 0, 1)] * 2,
+    # targets: shoot the imp straight ahead 6 times (dies), walk closer, then look right at the second one
+    "targets": [(0, 0, 0, 1), (0, 0, 0, 0)] * 6 + [(0, 1, 0, 0)] * 12 + [(-8, 1, 0, 0)] * 6 + [(0, 0, 0, 1), (0, 0, 0, 0)] * 2,
 }
 
 
@@ -33,11 +35,15 @@ def gen(level: Level, inputs, W: int, H: int, png_dir=None, aspect_y: int = 1, a
     """inputs: list of (turn, fwd, side, fire); ai_frames > 0: instead drive the on-chain wanderer AI (tools/ai.py).
     Frames get the weapon overlay (bob while walking, muzzle flash on shots), like the contract."""
     from ai import AiState, ai_step, frame_begin, gun_bob, player_move
-    from sprites import gun_sprites, overlay
+    from monsters import initial_monsters, shoot
+    from sprites import gun_sprites, monster_sprites, overlay
     sx, sy, sa = level.player_start
     st = AiState(sx << FRAC, sy << FRAC, sa * ANGLES // 360)
     r = Renderer(level, W, H, aspect_y)
-    x0, w, idle, flash = gun_sprites(wad or os.path.join(os.path.dirname(__file__), "..", "assets", "doom1.wad"), W, H)
+    wad = wad or os.path.join(os.path.dirname(__file__), "..", "assets", "doom1.wad")
+    x0, w, idle, flash = gun_sprites(wad, W, H)
+    monsters = initial_monsters(level)
+    r.set_monsters(monsters, monster_sprites(wad, aspect_y))
     frames = []
     n = ai_frames or len(inputs)
     if ai_frames:
@@ -51,6 +57,11 @@ def gen(level: Level, inputs, W: int, H: int, png_dir=None, aspect_y: int = 1, a
             turn, fwd, side, fire = inputs[i]
             frame_begin(st, ai=False, fire=bool(fire))
             player_move(level, st, turn, fwd, side)
+        # a shot (player or AI) may hit a target; then the monsters animate one frame
+        if st.gun == 2:   # fired this frame (GUN_FLASH_FRAMES)
+            shoot(level, monsters, st.x, st.y, sin_a(st.angle), cos_a(st.angle))
+        for m in monsters:
+            m.tick()
         viewz = (level.point_in_subsector(st.x, st.y).floor + VIEWHEIGHT) << FRAC
         cols = r.render(st.x, st.y, st.angle, viewz, stats=True)
         overlay(cols, flash if st.gun > 0 else idle, H, gun_bob(st))
@@ -114,7 +125,7 @@ def main(argv=None):
         f.write(root.to_boc())
     for frame_no, px, py, angle, viewz, h, st, _ in frames:
         print(f"frame {frame_no:3d} pos=({px/65536:.1f},{py/65536:.1f}) a={angle} z={viewz} hash={h.hex()[:16]} "
-              f"segs_drawn={st['segs_drawn']} col_events={st['col_events']} nodes={st['nodes']}")
+              f"segs_drawn={st['segs_drawn']} col_events={st['col_events']} nodes={st['nodes']} sprites={st['sprites']}")
     return 0
 
 
