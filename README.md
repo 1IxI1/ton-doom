@@ -1,5 +1,10 @@
 # Doom on TON
 
+![Doom E1M1 rendered on-chain, played back live from testnet](docs/demo.gif)
+
+*Live playback from testnet: every frame is rendered by the smart contract in the TVM and read back
+from the chain by the viewer ([mp4](docs/demo.mp4)).*
+
 Doom E1M1 rendered **inside the TVM** on TON testnet. The smart contract keeps the player state and the
 level's BSP tree, receives player inputs as external messages, renders 1-bit frames on-chain and emits
 each frame as an external-out message. A browser viewer subscribes to the contract on toncenter's
