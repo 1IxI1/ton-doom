@@ -280,3 +280,33 @@ get fun `test STOP ends the chain and START restarts it`() {
     expect(auto0).toEqual(0);
     expect(net.runGetMethod<int>(addr, "frameNo")).toEqual(0);
 }
+
+get fun `test a frame that runs out of gas bounces and the chain goes on`() {
+    val level = loadLevel();
+    val g = loadGolden("assets/golden/walk.boc");
+    val (addr, _) = deployDoom(level);
+    // gas limit below the render guard: busy frames fail with out-of-gas instead of being emitted partial
+    // (the walk path peaks above 900k; the first frame, rendered by the external itself, stays below)
+    raiseGasLimit(860000);
+    val n = min(g.count, 39);   // MAX_INPUTS per external
+    val res = net.sendExternal(net.createExternalMessage(addr, tickBody(g, 0, n, 1)));
+    expect(res).toBeAccepted();
+    val txs = res.unwrap();
+    expect(txs).toHaveFailedTx({ exitCode: -14 });
+    var frames = 0;
+    var failed = 0;
+    var t = 0;
+    while (t < txs.size()) {
+        frames += txs.at(t).externals.size();
+        if (txs.at(t).gasUsed >= 860000) {
+            failed += 1;
+        }
+        t += 1;
+    }
+    println("chain: {} txs, {} frames, {} failed", txs.size(), frames, failed);
+    // every failed frame was skipped by the bounce handler and the chain consumed the whole queue
+    expect(failed > 0).toEqual(true);
+    expect(frames + failed).toEqual(n);
+    expect(net.runGetMethod<int>(addr, "frameNo")).toEqual(n);
+    expect(net.runGetMethod<int>(addr, "queued")).toEqual(0);
+}

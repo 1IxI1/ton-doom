@@ -792,16 +792,19 @@ fun onBouncedMessage(in: InMessageBounced) {
         return;
     }
     var st = Storage.load();
-    if (!st.auto) {
-        return;
+    // the failed frame is skipped: drop its input, or (AI) turn a little so the retry renders another view
+    val (_, _, _, found) = popInput(mutate st);
+    if (!found) {
+        if (!st.auto) {
+            return;
+        }
+        st.angle = (st.angle + AI_TURN_RATE) & ANGLE_MASK;
+        st.turnDir = 0;
     }
-    // the failed frame is skipped: turn a little so the retry renders a different (cheaper) view
     st.rnd = (st.rnd * 1103515245 + 12345) & 0xFFFFFFFF;
     st.frameNo += 1;
-    st.angle = (st.angle + AI_TURN_RATE) & ANGLE_MASK;
-    st.turnDir = 0;
     st.lastStep = blockchain.now();
-    if (contract.getOriginalBalance() > MIN_CHAIN_BALANCE) {
+    if (((queuedCount(st.queue, st.qpos) > 0) | st.auto) & (contract.getOriginalBalance() > MIN_CHAIN_BALANCE)) {
         sendContinue(0);
     }
     st.save();
