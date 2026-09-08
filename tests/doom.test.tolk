@@ -286,12 +286,14 @@ get fun `test batch ordering: reorder buffer, lost batches skipped, old ids reje
     expect(net.runGetMethod<int>(addr, "frameNo")).toEqual(20);
 }
 
-get fun `test reset teleports the player and drops the queue`() {
+get fun `test reset teleports the player, drops the queue and revives the targets`() {
     val level = loadLevel();
-    val g = loadGolden("assets/golden/walk.boc");
+    val g = loadGolden("assets/golden/targets.boc");   // 6 shots kill the imp ahead
     val (addr, _) = deployDoom(level);
-    val res = net.sendExternal(net.createExternalMessage(addr, tickBody(g, 0, 5, 1)));
+    val res = net.sendExternal(net.createExternalMessage(addr, tickBody(g, 0, 12, 1)));
     expect(res).toBeAccepted();
+    val (dead0, alive0, _) = net.runGetMethod<(int, int, int)>(addr, "targets");
+    expect(alive0).toEqual(5);   // one is dying
     val body = beginCell().storeUint(0x52534554, 32).storeUint(2, 32).storeInt(1000 << 16, 32).storeInt(-3000 << 16, 32).storeUint(64, 16).endCell();
     val res2 = net.sendExternal(net.createExternalMessage(addr, body));
     expect(res2).toBeAccepted();
@@ -301,6 +303,9 @@ get fun `test reset teleports the player and drops the queue`() {
     expect(angle).toEqual(64);
     expect(net.runGetMethod<int>(addr, "queued")).toEqual(0);
     expect(net.runGetMethod<int>(addr, "lastBatch")).toEqual(2);
+    val (dead1, alive1, n1) = net.runGetMethod<(int, int, int)>(addr, "targets");
+    expect(dead1).toEqual(0);
+    expect(alive1).toEqual(n1);
 }
 
 get fun `test owner can withdraw the balance, others cannot`() {

@@ -426,9 +426,25 @@
   window.addEventListener('keydown', (e) => onKey(e, true));
   window.addEventListener('keyup', (e) => onKey(e, false));
   window.addEventListener('blur', () => keys.clear());
+  // RSET: teleport to the level start and revive the targets; goes through a relay like the inputs
+  async function sendReset() {
+    const addr = $('addr').value.trim();
+    if (!apiKey()) { log('reset needs the toncenter API key (local config.js)', 'err'); return; }
+    let id;
+    if (playing) { pending = []; sent = []; id = lastAck + 1; }
+    else { try { id = (await getLastBatch(addr)) + 1; } catch (e) { log('cannot read lastBatch: ' + e.message, 'err'); return; } }
+    const relay = nextRelay();
+    const body = Boc.beginCell();
+    if (relay) body.storeAddress(addr);
+    body.storeUint(0x52534554, 32).storeUint(id, 32).storeInt(1056 << 16, 32).storeInt(-3616 << 16, 32).storeUint(128, 16);
+    const msg = Boc.beginCell().storeUint(2, 2).storeUint(0, 2).storeAddress(relay || addr).storeCoins(0).storeBit(0).storeBit(1).storeRef(body.endCell()).endCell();
+    try { await api('/api/v3/message', { boc: Boc.toBase64(Boc.serialize(msg)) }); log(`reset sent (batch ${id}): back to the start, targets revived`); if (playing) { lastAck = id; holdUntil = 0; } }
+    catch (e) { log('reset rejected: ' + e.message, 'err'); }
+  }
+  $('reset').onclick = sendReset;
   $('play').onclick = () => (playing ? stopPlay() : startPlay());
   $('rate').onchange = () => { if (playing) { stopPlay(); startPlay(); } };
-  if (hosted) { $('play').hidden = true; $('rateopt').hidden = true; }
+  if (hosted) { $('play').hidden = true; $('reset').hidden = true; $('rateopt').hidden = true; }
 
   $('connect').onclick = () => (ws ? disconnect() : connectWs());
   $('poll').onclick = () => (pollTimer ? disconnect() : startPoll());

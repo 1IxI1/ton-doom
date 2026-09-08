@@ -1313,7 +1313,10 @@ fun handleCommand(inBody: slice, isExternal: bool) {
         st.queue = null;
         st.held = null;
         st.qpos = 0;
+        st.gun = 0;
         st.lastBatch = batchId;
+        // the targets come back too (initial monsters from the level assets, ref3 -> ref2)
+        st.monsters = st.level.beginParse().refAt(3).beginParse().refAt(2);
         st.save();
         return;
     }
