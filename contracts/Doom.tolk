@@ -87,6 +87,7 @@ struct Storage {
     qpos: uint8        // inputs already consumed from the head queue cell
     queue: cell?       // FIFO of inputs: cells [count:8, count x (turn:int8 fwd:int8 side:int8)], ref0 = next
     held: cell?        // batch lastBatch+2 that arrived before lastBatch+1 (reorder buffer of one batch)
+    owner: address     // may withdraw the balance (internal message with op WDRW)
     level: cell        // see tools/level_encode.py
 }
 
@@ -121,6 +122,11 @@ struct (0x4652414D) FrameEvent {   // "FRAM"
 struct (0x434F4E54) Continue {     // "CONT" internal self-message
     hop: uint32
 }
+
+struct (0x57445257) Withdraw {     // "WDRW" internal from the owner: send the whole balance back
+}
+
+type InternalMsg = Continue | Withdraw
 
 // ---------------------------------------------------------------------------------------------
 // TVM helpers
@@ -601,7 +607,7 @@ fun onInternalMessage(in: InMessage) {
     if (in.body.isEmpty()) {
         return;   // plain top-up
     }
-    val msg = lazy Continue.fromSlice(in.body);
+    val msg = lazy InternalMsg.fromSlice(in.body);
     match (msg) {
         Continue => {
             if (in.senderAddress != contract.getAddress()) {
@@ -610,6 +616,14 @@ fun onInternalMessage(in: InMessage) {
             var st = Storage.load();
             step(mutate st, msg.hop);
             st.save();
+        }
+        Withdraw => {
+            val st = lazy Storage.load();
+            if (in.senderAddress != st.owner) {
+                return;
+            }
+            val back = createMessage({ bounce: false, value: 0, dest: st.owner, body: Withdraw {} });
+            back.send(SEND_MODE_CARRY_ALL_BALANCE);
         }
         else => {
             // unknown internal message: ignore (keep the value)

@@ -58,7 +58,7 @@ fun deployDoom(level: cell): (address, Treasury) {
     // player start of E1M1: (1056, -3616), angle 90 deg = 128 units
     val stateInit: ContractState = {
         code: build("Doom"),
-        data: Storage { frameNo: 0, px: 1056 << 16, py: -3616 << 16, angle: 128, lastBatch: 0, qpos: 0, queue: null, held: null, level }.toCell(),
+        data: Storage { frameNo: 0, px: 1056 << 16, py: -3616 << 16, angle: 128, lastBatch: 0, qpos: 0, queue: null, held: null, owner: deployer.address, level }.toCell(),
     };
     val addr = AutoDeployAddress { stateInit }.calculateAddress();
     net.registerAddress(addr, "doom");
@@ -231,4 +231,17 @@ get fun `test reset teleports the player and drops the queue`() {
     expect(angle).toEqual(64);
     expect(net.runGetMethod<int>(addr, "queued")).toEqual(0);
     expect(net.runGetMethod<int>(addr, "lastBatch")).toEqual(2);
+}
+
+get fun `test owner can withdraw the balance, others cannot`() {
+    val level = loadLevel();
+    val (addr, deployer) = deployDoom(level);
+    val stranger = testing.treasury("stranger");
+    val body = Withdraw {}.toCell();
+    val r1 = net.send(stranger.address, createMessage({ bounce: false, value: grams("0.1"), dest: addr, body }));
+    expect(r1).toHaveAllSuccessfulTxs();
+    expect(testing.getAccountBalance(addr) > grams("50")).toEqual(true);
+    val r2 = net.send(deployer.address, createMessage({ bounce: false, value: grams("0.1"), dest: addr, body }));
+    expect(r2).toHaveAllSuccessfulTxs();
+    expect(testing.getAccountBalance(addr) < grams("1")).toEqual(true);
 }
