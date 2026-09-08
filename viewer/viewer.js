@@ -8,12 +8,21 @@
   const OP_FRAME = 0x4652414d;
   // config.js is generated from .env by `python3 tools/viewer_config.py` (not committed):
   //   window.DOOM_CONFIG = { addr: DOOM_ADDRESS, key: TONCENTER_TESTNET_API_KEY }
+  // Without it (e.g. on GitHub Pages) the viewer polls toncenter once a second without an API key.
   const CFG = window.DOOM_CONFIG || {};
-  const DEFAULTS = { base: 'testnet.toncenter.com' };
+  const DEFAULTS = {
+    base: 'testnet.toncenter.com',
+    addr: 'kQBxJSn7hpqEbRTEeY57W840wOJNJIvXovFrXzmdphW-Yc_Q',   // current testnet deployment (public); override with ?addr=
+    pollMs: 1000,          // keyless polling interval (toncenter allows ~1 request/s without a key)
+    pollLimit: 60,
+  };
 
   const $ = (id) => document.getElementById(id);
-  $('addr').value = CFG.addr || '';
+  const params = new URLSearchParams(location.search);
+  $('addr').value = params.get('addr') || CFG.addr || DEFAULTS.addr;
   const apiKey = () => CFG.key || '';   // never shown in the UI
+  const hosted = !apiKey();
+  if (hosted) { $('fps').value = '15'; $('connect').hidden = true; }
 
   const canvas = $('screen');
   const ctx = canvas.getContext('2d');
@@ -178,7 +187,8 @@
 
   // ---- transport: REST polling fallback -------------------------------------------------------
   async function fetchTxs(addr, key, qs) {
-    const r = await fetch(`https://${DEFAULTS.base}/api/v3/transactions?account=${encodeURIComponent(addr)}&${qs}`, { headers: { 'X-API-Key': key } });
+    const headers = key ? { 'X-API-Key': key } : {};
+    const r = await fetch(`https://${DEFAULTS.base}/api/v3/transactions?account=${encodeURIComponent(addr)}&${qs}`, { headers });
     if (!r.ok) throw new Error('HTTP ' + r.status);
     return (await r.json()).transactions || [];
   }
@@ -195,15 +205,23 @@
   function startPoll() {
     disconnect();
     const addr = $('addr').value.trim(), key = apiKey();
-    if (!addr || !key) { setStatus('no config: run python3 tools/viewer_config.py (reads .env)', 'err'); return; }
-    setStatus('polling', 'on'); $('poll').classList.add('on');
+    if (!addr) { setStatus('no contract address (?addr=...)', 'err'); return; }
+    setStatus(key ? 'polling' : 'polling (no api key, 1 req/s)', 'on'); $('poll').classList.add('on');
     loadHistory(addr, key, 60);
+    let busy = false, backoff = 0;
+    const interval = key ? 700 : DEFAULTS.pollMs;
     pollTimer = setInterval(async () => {
+      if (busy) return;
+      if (backoff > 0) { backoff--; return; }
+      busy = true;
       try {
-        const txs = await fetchTxs(addr, key, `limit=100&sort=asc&start_lt=${pollLt + 1}`);
+        const txs = await fetchTxs(addr, key, `limit=${DEFAULTS.pollLimit}&sort=asc&start_lt=${pollLt + 1}`);
         for (const tx of txs) { ingestTx(tx); pollLt = Math.max(pollLt, Number(tx.lt)); }
-      } catch (e) { log('poll failed: ' + e.message, 'err'); }
-    }, 700);
+      } catch (e) {
+        log('poll failed: ' + e.message, 'err');
+        backoff = /429/.test(e.message) ? 5 : 2;   // rate limited: pause a few ticks
+      } finally { busy = false; }
+    }, interval);
   }
   function disconnect() {
     if (ws) { const w = ws; ws = null; try { w.close(); } catch (e) {} }
@@ -214,5 +232,5 @@
   $('connect').onclick = () => (ws ? disconnect() : connectWs());
   $('poll').onclick = () => (pollTimer ? disconnect() : startPoll());
   $('pause').onclick = () => { paused = !paused; $('pause').classList.toggle('on', paused); };
-  if (CFG.addr && CFG.key) connectWs();
+  if (hosted) startPoll(); else connectWs();
 })();
