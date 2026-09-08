@@ -20,6 +20,7 @@
   const $ = (id) => document.getElementById(id);
   const params = new URLSearchParams(location.search);
   $('addr').value = params.get('addr') || CFG.addr || DEFAULTS.addr;
+  $('explorer').href = 'https://testnet.tonviewer.com/' + $('addr').value;
   const apiKey = () => CFG.key || '';   // never shown in the UI
   const hosted = !apiKey();
   if (hosted) { $('fps').value = '15'; $('connect').hidden = true; }

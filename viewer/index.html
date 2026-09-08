@@ -12,6 +12,7 @@
   header input.addr { width: 46ch; }
   header button { background: #333; color: #eee; border: 1px solid #555; padding: 4px 10px; font: inherit; cursor: pointer; }
   header button.on { background: #2a5; color: #000; }
+  #about { margin: 0; padding: 8px 12px 16px; color: #999; max-width: 90ch; }
   main { display: flex; gap: 16px; padding: 12px; flex-wrap: wrap; align-items: flex-start; }
   canvas { image-rendering: pixelated; image-rendering: crisp-edges; background: #000; border: 1px solid #333; }
   #stats { min-width: 34ch; white-space: pre; }
@@ -38,6 +39,11 @@
     <div id="log"></div>
   </div>
 </main>
+<p id="about">Nobody is playing: the player is an <b>on-chain AI</b>. The contract itself decides every step
+(probes the level's blockmap, turns away from walls, shoots now and then) and renders every frame inside the TVM;
+the viewer only reads the frames back from testnet.
+<a id="explorer" href="#" target="_blank" rel="noopener">contract in explorer</a> ·
+<a href="https://github.com/1IxI1/ton-doom" target="_blank" rel="noopener">source</a></p>
 <script src="config.js"></script>
 <script src="boc.js"></script>
 <script src="viewer.js"></script>
