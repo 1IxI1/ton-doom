@@ -1,3 +1,5 @@
+<p align="center"><img src="viewer/logo.png" alt="Doom on TON" width="246"></p>
+
 # Doom on TON
 
 ![Doom E1M1 rendered on-chain, played back live from testnet](docs/demo.gif)
