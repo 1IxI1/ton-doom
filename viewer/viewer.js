@@ -12,7 +12,7 @@
   const CFG = window.DOOM_CONFIG || {};
   const DEFAULTS = {
     base: 'testnet.toncenter.com',
-    addr: 'kQDud5Q6YbVw7k-oNbaCAh-zycT468Txcr1f3A5WYfk41yXt',   // current testnet deployment (on-chain wanderer AI); override with ?addr=
+    addr: 'kQBfL0vdKQ0cZlSfqPyni47l_unOrWQJk5R71c7mBefTYKy2',   // current testnet deployment (on-chain wanderer AI); override with ?addr=
     pollMs: 1100,          // keyless polling interval (toncenter allows ~1 request/s without a key)
     pollLimit: 60,
   };

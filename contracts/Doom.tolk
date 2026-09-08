@@ -44,9 +44,10 @@ const SPEED_SIDE = 6;
 const SIN_PER_LEAF = 56;
 const SIN_BITS = 18;
 const MAX_INPUTS = 39;            // per external message (op:32 batchId:32 count:8 + 39 x 24 bits fit in one cell)
-const GAS_BUDGET = 950000;        // hard stop for rendering work (leaves ~50k to pack, emit, save, continue)
+const GAS_BUDGET = 930000;        // hard stop for rendering work (leaves ~70k: weapon overlay ~18k, pack, emit, save, continue)
 const GAS_NODE_MARGIN = 25000;    // a node/subsector visit may add this much before the next check
-// (the per-run column guard, 2600 gas per column, is baked into the generated seg drawers)
+// (the per-run column guard, 2600 gas per column and the same budget, is baked into the generated seg drawers:
+//  regenerate render-asm.tolk when GAS_BUDGET changes)
 const CONT_VALUE = 100000000;     // 0.1 TON attached to each self-continuation (buys the 1M gas limit)
 const MIN_CHAIN_BALANCE = 400000000; // keep the chain going only while the balance is above 0.4 TON
 const SEG_TAIL_BITS = 66;         // bits of a seg record after kind + 4 coords
@@ -767,19 +768,45 @@ fun step(mutate st: Storage, hop: int) {
     emitFrame(st, viewz, pixels, queued);
     st.lastStep = blockchain.now();
     if (((queued > 0) | st.auto) & (contract.getOriginalBalance() > MIN_CHAIN_BALANCE)) {
-        val cont = createMessage({
-            bounce: false,
-            value: CONT_VALUE,
-            dest: contract.getAddress(),
-            body: Continue { hop: hop + 1 },
-        });
-        cont.send(SEND_MODE_REGULAR);
+        sendContinue(hop + 1);
     }
+}
+
+// The self-continuation is bounceable: if a frame transaction ever fails (out of gas), the bounce lands in
+// onBouncedMessage, which nudges the state and keeps the chain alive instead of letting it die silently.
+fun sendContinue(hop: int) {
+    val cont = createMessage({
+        bounce: true,
+        value: CONT_VALUE,
+        dest: contract.getAddress(),
+        body: Continue { hop },
+    });
+    cont.send(SEND_MODE_REGULAR);
 }
 
 // ---------------------------------------------------------------------------------------------
 // Entrypoints
 // ---------------------------------------------------------------------------------------------
+fun onBouncedMessage(in: InMessageBounced) {
+    if (in.senderAddress != contract.getAddress()) {
+        return;
+    }
+    var st = Storage.load();
+    if (!st.auto) {
+        return;
+    }
+    // the failed frame is skipped: turn a little so the retry renders a different (cheaper) view
+    st.rnd = (st.rnd * 1103515245 + 12345) & 0xFFFFFFFF;
+    st.frameNo += 1;
+    st.angle = (st.angle + AI_TURN_RATE) & ANGLE_MASK;
+    st.turnDir = 0;
+    st.lastStep = blockchain.now();
+    if (contract.getOriginalBalance() > MIN_CHAIN_BALANCE) {
+        sendContinue(0);
+    }
+    st.save();
+}
+
 fun onInternalMessage(in: InMessage) {
     if (in.body.isEmpty()) {
         return;   // plain top-up
