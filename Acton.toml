@@ -1,0 +1,30 @@
+[package]
+name = "ton-doom"
+description = "Doom E1M1 rendered on-chain in TVM: frames are emitted as external-out messages"
+version = "0.1.0"
+license = "MIT"
+
+[toolchain]
+acton = "trunk"
+
+[contracts.Doom]
+src = "contracts/Doom.tolk"
+depends = []
+
+[build]
+output-fift = "build/fift"
+
+[test]
+
+[fmt]
+width = 110
+
+[scripts]
+deploy-testnet = "acton script scripts/deploy.tolk --net testnet"
+
+[import-mappings]
+acton = ".acton"
+contracts = "contracts"
+gen = "gen"
+tests = "tests"
+wrappers = "wrappers"

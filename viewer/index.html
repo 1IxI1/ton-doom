@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Doom on TON — viewer</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; background: #0b0b0b; color: #ddd; font: 13px/1.4 ui-monospace, Menlo, monospace; }
+  header { display: flex; gap: 12px; align-items: center; padding: 8px 12px; background: #161616; flex-wrap: wrap; }
+  header input { background: #222; color: #eee; border: 1px solid #444; padding: 4px 6px; font: inherit; }
+  header input.addr { width: 46ch; }
+  header input.key { width: 34ch; }
+  header button { background: #333; color: #eee; border: 1px solid #555; padding: 4px 10px; font: inherit; cursor: pointer; }
+  header button.on { background: #2a5; color: #000; }
+  main { display: flex; gap: 16px; padding: 12px; flex-wrap: wrap; align-items: flex-start; }
+  canvas { image-rendering: pixelated; image-rendering: crisp-edges; background: #000; border: 1px solid #333; }
+  #stats { min-width: 34ch; white-space: pre; }
+  #log { max-height: 40vh; overflow: auto; white-space: pre; color: #9a9; font-size: 12px; }
+  .warn { color: #fa5; }
+  .err { color: #f66; }
+  a { color: #8cf; }
+</style>
+</head>
+<body>
+<header>
+  <b>DOOM on TON</b>
+  <label>contract <input class="addr" id="addr" value=""></label>
+  <label>api key <input class="key" id="key" value=""></label>
+  <label>fps <input id="fps" value="25" style="width:5ch"></label>
+  <button id="connect">connect</button>
+  <button id="poll">poll mode</button>
+  <button id="pause">pause</button>
+  <span id="status" class="warn">idle</span>
+</header>
+<main>
+  <canvas id="screen" width="640" height="480"></canvas>
+  <div>
+    <div id="stats"></div>
+    <div id="log"></div>
+  </div>
+</main>
+<script src="boc.js"></script>
+<script src="viewer.js"></script>
+</body>
+</html>
