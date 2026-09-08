@@ -13,7 +13,7 @@
   const DEFAULTS = {
     base: 'testnet.toncenter.com',
     addr: 'kQBxJSn7hpqEbRTEeY57W840wOJNJIvXovFrXzmdphW-Yc_Q',   // current testnet deployment (public); override with ?addr=
-    pollMs: 1000,          // keyless polling interval (toncenter allows ~1 request/s without a key)
+    pollMs: 1100,          // keyless polling interval (toncenter allows ~1 request/s without a key)
     pollLimit: 60,
   };
 
@@ -219,7 +219,7 @@
         for (const tx of txs) { ingestTx(tx); pollLt = Math.max(pollLt, Number(tx.lt)); }
       } catch (e) {
         log('poll failed: ' + e.message, 'err');
-        backoff = /429/.test(e.message) ? 5 : 2;   // rate limited: pause a few ticks
+        backoff = /429/.test(e.message) ? 2 : 1;   // rate limited: skip a couple of ticks
       } finally { busy = false; }
     }, interval);
   }
