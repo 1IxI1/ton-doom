@@ -10,7 +10,10 @@
   header { display: flex; gap: 12px; align-items: center; padding: 8px 12px; background: #161616; flex-wrap: wrap; }
   header .logo { height: 28px; image-rendering: auto; margin-right: 4px; }
   header input { background: #222; color: #eee; border: 1px solid #444; padding: 4px 6px; font: inherit; }
-  header input.addr { width: 46ch; }
+  header details { display: inline-block; }
+  header details summary { cursor: pointer; color: #9ab; }
+  header details[open] summary { margin-right: 8px; }
+  .dim { color: #888; }
   header select { background: #222; color: #eee; border: 1px solid #444; padding: 4px 6px; font: inherit; }
   header button { background: #333; color: #eee; border: 1px solid #555; padding: 4px 10px; font: inherit; cursor: pointer; }
   header button.on { background: #2a5; color: #000; }
@@ -35,17 +38,21 @@
 <body>
 <header>
   <img class="logo" src="logo.png" alt="DOOM on TON" title="Doom on TON">
-  <label>contract <input class="addr" id="addr" value="" readonly></label>
-  <label>fps <input id="fps" value="25" style="width:5ch"></label>
-  <button id="connect">connect</button>
-  <button id="poll">poll mode</button>
-  <button id="pause">pause</button>
+  <label>server <select id="server"></select></label>
   <button id="play">play</button>
   <button id="reset" title="teleport to the start and revive the targets (RSET)">reset</button>
-  <label id="rateopt" title="inputs per second = on-chain frames per second; 10/s moves as fast (double steps) at half the gas and keeps the chain from lagging behind"><select id="rate"><option value="10" selected>10 inputs/s</option><option value="20">20 inputs/s</option></select></label>
-  <label id="pendingopt" title="min_finality=pending: toncenter emulates the transactions on receipt, ~0.3 s instead of ~1 s; frames are marked EMULATED until the block confirms them"><input type="checkbox" id="pending"> pending frames (emulated)</label>
+  <button id="pause">pause</button>
+  <label title="optional: a free toncenter testnet api key (@tonapibot); with it frames stream over WebSocket and inputs go out 5x more often">api key <input id="key" type="password" placeholder="optional, faster" style="width:22ch" autocomplete="off"></label>
   <span id="status" class="warn">idle</span>
-  <span id="hint" hidden>arrows / WASD walk and turn, A D strafe, space fires (inputs go to the chain in batches; ~1.5 s to the screen)</span>
+  <details class="more"><summary>more</summary>
+    <label>fps <input id="fps" value="15" style="width:5ch"></label>
+    <button id="connect">streaming</button>
+    <button id="poll">poll mode</button>
+    <label id="rateopt" title="inputs per second = on-chain frames per second; 10/s moves as fast (double steps) at half the gas and keeps the chain from lagging behind"><select id="rate"><option value="10" selected>10 inputs/s</option><option value="20">20 inputs/s</option></select></label>
+    <label id="pendingopt" title="min_finality=pending: toncenter emulates the transactions on receipt, ~0.3 s instead of ~1 s; frames are marked EMULATED until the block confirms them"><input type="checkbox" id="pending"> pending frames (emulated)</label>
+  </details>
+  <span id="modeinfo" class="dim"></span>
+  <span id="hint" hidden>arrows / WASD walk and turn, A D strafe, space fires</span>
 </header>
 <main>
   <canvas id="screen" width="640" height="480"></canvas>
@@ -60,9 +67,11 @@
 sends it to the contract through toncenter. The contract moves the player (blockmap collisions, sliding along
 walls), renders the frame and emits it; what you see is read back from testnet. Six imps stand in the hangar:
 six pistol hits each (they do not fight back).</p>
-<p id="about">Nobody is playing: the player is an <b>on-chain AI</b>. The contract itself decides every step
-(probes the level's blockmap, turns away from walls, shoots now and then) and renders every frame inside the TVM;
-the viewer only reads the frames back from testnet.
+<p id="about">Pick a <b>free</b> server and press <b>play</b>: the contract moves the player, renders every
+frame inside the TVM and emits it; this page only sends your keys to the chain and reads the frames back from
+testnet. A server counts as free when nobody moved there for 2 minutes (no locks: it is a testnet toy). The
+"AI demo" server is driven by an <b>on-chain AI</b> that probes the level's blockmap, turns away from walls and
+shoots now and then.
 <a id="explorer" href="#" target="_blank" rel="noopener">contract in explorer</a> ·
 <a href="https://github.com/1IxI1/ton-doom" target="_blank" rel="noopener">source</a></p>
 <section id="frames">
@@ -98,6 +107,7 @@ each column. The decoder is ~30 lines: <code>viewer/boc.js</code> parses the BOC
 reads the fields above and paints the columns onto a canvas; <code>tools/doom.py frames</code> does the same
 into PNG files.</p>
 </section>
+<script src="servers.js"></script>
 <script src="config.js"></script>
 <script src="boc.js"></script>
 <script src="viewer.js"></script>

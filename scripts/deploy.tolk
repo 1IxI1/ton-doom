@@ -30,13 +30,26 @@ fun main() {
     if (level == null) {
         Assert.fail("cannot decode level boc");
     }
-    val salt = env<int>("DOOM_SALT") ?? 0;   // change to get a fresh contract address
-    val stateInit: ContractState = {
-        code: build("Doom"),
-        // player 1 start of E1M1: (1056, -3616), facing north (90 deg = 128 angle units)
-        data: Storage { frameNo: salt, px: 1056 << 16, py: -3616 << 16, angle: 128, lastBatch: 0, qpos: 0, queue: null, held: null, owner: wallet.address, auto: false, turnDir: 0, rnd: 1, lastStep: 0, gun: 0, monsters: initialMonsters(level!), level: level! }.toCell(),
-    };
-    val addr = AutoDeployAddress { stateInit }.calculateAddress();
+    var salt = env<int>("DOOM_SALT") ?? 0;   // change to get a fresh contract address
+    val prefix = env<int>("DOOM_PREFIX");     // optional: top 2 bits of the address (0..3), the salt is bumped until it matches
+    val code = build("Doom");
+    var stateInit: ContractState = { code, data: beginCell().endCell() };
+    var addr = wallet.address;
+    var more = true;
+    while (more) {
+        stateInit = {
+            code,
+            // player 1 start of E1M1: (1056, -3616), facing north (90 deg = 128 angle units)
+            data: Storage { frameNo: salt, px: 1056 << 16, py: -3616 << 16, angle: 128, lastBatch: 0, qpos: 0, queue: null, held: null, owner: wallet.address, auto: false, turnDir: 0, rnd: 1, lastStep: 0, gun: 0, monsters: initialMonsters(level!), level: level! }.toCell(),
+        };
+        addr = AutoDeployAddress { stateInit }.calculateAddress();
+        val (_, h) = addr.getWorkchainAndHash();
+        more = (prefix != null) && ((h >> 254) != prefix!);
+        if (more) {
+            salt += 1;
+        }
+    }
+    println("salt {}", salt);
     println("doom address: {}", addr);
     println("DOOM_ADDRESS={}", addr);
 

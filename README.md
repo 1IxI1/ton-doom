@@ -6,8 +6,10 @@
 
 *Live playback from testnet: every frame is rendered by the smart contract in the TVM and read back
 from the chain by the viewer (right); on the left, the frame transactions arriving in the explorer
-([mp4](docs/demo.mp4)). Watch it live: **https://1ixi1.github.io/ton-doom/** (polls toncenter once a
-second without an API key; the on-chain AI keeps walking by itself).*
+([mp4](docs/demo.mp4)). **Play it: https://1ixi1.github.io/ton-doom/** — pick a free server, press play,
+arrows / WASD walk, space fires; six imps to kill, reset revives them. Without an API key everything goes
+through toncenter at ~1 request/s (inputs reach the screen in ~3 s); paste a free toncenter testnet key
+(@tonapibot) for streaming and ~0.8 s. Or watch the "AI demo" server where the on-chain AI plays.*
 
 Doom E1M1 rendered **inside the TVM** on TON testnet. The smart contract keeps the player state and the
 level's BSP tree, receives player inputs as external messages, renders 1-bit frames on-chain and emits
@@ -69,11 +71,14 @@ Every transaction there is one rendered frame.
   frame hashes). `tools/golden.py` builds golden frames, `tools/level_encode.py` packs E1M1 into cells,
   `tools/wad.py` parses the WAD, `tools/boc.py` is a dependency-free BOC/cell library.
 * `viewer/index.html` — the viewer (WebSocket streaming, `min_finality: confirmed`, adaptive playback).
-  With a local `config.js` (API key, relay addresses) it also has a **play** mode: arrows / WASD walk and
-  turn, space fires; key samples (10/s, double steps) are packed into small batches (`viewer/boc.js`
-  builds the BOC in the browser) sent to the relays every 0.3 s, confirmed from the transaction stream
-  and resent once with a nonce if a batch does not land. Measured: 0.8 s from key press to the frame on
-  screen, no stalls over 45 s of continuous play. The "pending frames" option subscribes with
+  **Play mode** for anyone: four public servers (`viewer/servers.js`, generated from `assets/servers.json`),
+  each a Doom contract with 50 input relays sharing its top address bits (one server per prefix 00/01/10/11,
+  so a shard split keeps each server with its relays); a server counts as free when nobody moved there for
+  2 minutes (no locks, testnet toy). Arrows / WASD walk and turn, space fires; key samples (10/s, double
+  steps) are packed into small batches (`viewer/boc.js` builds the BOC in the browser) sent to the relays,
+  confirmed from the transaction stream and resent once with a nonce if a batch does not land. Without an
+  API key all requests share one ~1/s queue (inputs first); with a key batches go every 0.3 s and frames
+  stream over WebSocket: 0.8 s from key press to the frame on screen. The "pending frames" option subscribes with
   `min_finality: pending`: toncenter emulates the transactions on receipt and the frames arrive in ~0.35 s,
   marked EMULATED (orange border) until the block confirms them; the confirmed frame is compared with the
   emulated one and corrections are counted.
