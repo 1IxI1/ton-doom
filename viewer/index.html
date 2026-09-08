@@ -8,6 +8,7 @@
   :root { color-scheme: dark; }
   body { margin: 0; background: #0b0b0b; color: #ddd; font: 13px/1.4 ui-monospace, Menlo, monospace; }
   header { display: flex; gap: 12px; align-items: center; padding: 8px 12px; background: #161616; flex-wrap: wrap; }
+  header .logo { height: 28px; image-rendering: auto; margin-right: 4px; }
   header input { background: #222; color: #eee; border: 1px solid #444; padding: 4px 6px; font: inherit; }
   header input.addr { width: 46ch; }
   header select { background: #222; color: #eee; border: 1px solid #444; padding: 4px 6px; font: inherit; }
@@ -33,7 +34,7 @@
 </head>
 <body>
 <header>
-  <b>DOOM on TON</b>
+  <img class="logo" src="logo.png" alt="DOOM on TON" title="Doom on TON">
   <label>contract <input class="addr" id="addr" value="" readonly></label>
   <label>fps <input id="fps" value="25" style="width:5ch"></label>
   <button id="connect">connect</button>
