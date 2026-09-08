@@ -10,7 +10,6 @@
   header { display: flex; gap: 12px; align-items: center; padding: 8px 12px; background: #161616; flex-wrap: wrap; }
   header input { background: #222; color: #eee; border: 1px solid #444; padding: 4px 6px; font: inherit; }
   header input.addr { width: 46ch; }
-  header input.key { width: 34ch; }
   header button { background: #333; color: #eee; border: 1px solid #555; padding: 4px 10px; font: inherit; cursor: pointer; }
   header button.on { background: #2a5; color: #000; }
   main { display: flex; gap: 16px; padding: 12px; flex-wrap: wrap; align-items: flex-start; }
@@ -25,8 +24,7 @@
 <body>
 <header>
   <b>DOOM on TON</b>
-  <label>contract <input class="addr" id="addr" value=""></label>
-  <label>api key <input class="key" id="key" value="" placeholder="from .env via tools/viewer_config.py"></label>
+  <label>contract <input class="addr" id="addr" value="" readonly></label>
   <label>fps <input id="fps" value="25" style="width:5ch"></label>
   <button id="connect">connect</button>
   <button id="poll">poll mode</button>

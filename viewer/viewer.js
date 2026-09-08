@@ -13,7 +13,7 @@
 
   const $ = (id) => document.getElementById(id);
   $('addr').value = CFG.addr || '';
-  $('key').value = CFG.key || '';
+  const apiKey = () => CFG.key || '';   // never shown in the UI
 
   const canvas = $('screen');
   const ctx = canvas.getContext('2d');
@@ -148,8 +148,8 @@
   // ---- transport: WebSocket streaming ---------------------------------------------------------
   function connectWs() {
     disconnect();
-    const addr = $('addr').value.trim(), key = $('key').value.trim();
-    if (!addr || !key) { setStatus('set contract address and api key (python3 tools/viewer_config.py)', 'err'); return; }
+    const addr = $('addr').value.trim(), key = apiKey();
+    if (!addr || !key) { setStatus('no config: run python3 tools/viewer_config.py (reads .env)', 'err'); return; }
     const url = `wss://${DEFAULTS.base}/api/streaming/v2/ws?api_key=${encodeURIComponent(key)}`;
     setStatus('connecting…', 'warn');
     ws = new WebSocket(url);
@@ -194,7 +194,8 @@
   }
   function startPoll() {
     disconnect();
-    const addr = $('addr').value.trim(), key = $('key').value.trim();
+    const addr = $('addr').value.trim(), key = apiKey();
+    if (!addr || !key) { setStatus('no config: run python3 tools/viewer_config.py (reads .env)', 'err'); return; }
     setStatus('polling', 'on'); $('poll').classList.add('on');
     loadHistory(addr, key, 60);
     pollTimer = setInterval(async () => {
