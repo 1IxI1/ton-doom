@@ -11,6 +11,10 @@ acton = "trunk"
 src = "contracts/Doom.tolk"
 depends = []
 
+[contracts.Relay]
+src = "contracts/Relay.tolk"
+depends = []
+
 [build]
 output-fift = "build/fift"
 

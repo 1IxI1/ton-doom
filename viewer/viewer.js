@@ -90,6 +90,7 @@
     return true;
   }
   function ingestTx(tx, finality) {
+    if (finality !== 'pending') ackFromTx(tx);
     for (const f of framesFromTx(tx)) {
       f.finality = finality || 'confirmed';
       stat.received++;
@@ -260,17 +261,32 @@
     $('connect').classList.remove('on'); $('poll').classList.remove('on');
   }
 
-  // ---- play: keyboard -> inputs (20/s) -> batches (one external per 0.5 s) -> the contract ---------
-  // Externals need no signature: batchId must be lastBatch+1 (or +2, one batch may overtake). We keep at
-  // most two batches in flight, confirm them through the `lastBatch` get method and resend after 3 s.
+  // ---- play: keyboard -> inputs -> batches (one external per 0.5 s) -> the contract ----------------
+  // Externals need no signature. Batch ids are consecutive; the contract applies lastBatch+1 at once and keeps
+  // batches that arrive ahead of it in a 3-slot reorder buffer; when the buffer is full or the oldest waited
+  // 2 s, the batches before it are declared lost (skipped), so a batch the mempool never delivers costs half
+  // a second of inputs instead of a stall. Batches are confirmed from
+  // the transaction stream (the landed external names its batch id; a landed id confirms everything
+  // before it) with the `lastBatch` get method as a fallback. Everything sent keeps a minimum gap of
+  // PLAY.sendGapMs (the mempool caps externals per address). With input relays (config.js `relays`, see
+  // contracts/Relay.tolk) batches go to the relays in turn, so the gap can be much shorter.
   const OP_TICK = 0x444f4f4d;
-  const PLAY = { rate: 20, turn: 6, batchMs: 400, maxBatch: 29, inFlight: 2, resendMs: 3000, fireEvery: 8, tail: 3 };
+  // Input rate: every input is one on-chain frame (~0.9M gas, ~10 per block), so 20 inputs/s nearly saturates
+  // the shard and the queue (latency) grows; 10/s with doubled steps moves just as fast at half the gas.
+  // Lost externals: the mempool sometimes never delivers a message (and rejects an identical resend as a
+  // duplicate), so a resend carries a fresh nonce after the inputs (the contract ignores trailing bits).
+  const PLAY = { rate: 10, sendGapMs: 500, relayGapMs: 300, ackMs: 2000, maxBatch: 29, inFlight: 6, resendMs: 1500, resendEveryMs: 1000, maxResends: 1, holdMs: 1500, maxPending: 40, fireEvery: 4, tail: 2 };
+  const stepMul = () => (PLAY.rate >= 20 ? 1 : 2);   // fwd/side units and turn per input
   const KEYMAP = { ArrowUp: 'fwd', KeyW: 'fwd', ArrowDown: 'back', KeyS: 'back', ArrowLeft: 'left', ArrowRight: 'right',
                    KeyA: 'sleft', KeyD: 'sright', Space: 'fire', ControlLeft: 'fire', ControlRight: 'fire', KeyF: 'fire' };
   const keys = new Set();
-  let playing = false, timers = [], pending = [], sent = [], nextBatch = 0, lastAck = 0, fireEdge = false, fireHold = 0, tail = 0;
-  let playAddr = '', lastFlushAt = 0;
-  const pstat = { sentInputs: 0, batches: 0, resent: 0 };
+  let playing = false, timers = [], pending = [], sent = [], lastAck = 0, fireEdge = false, fireHold = 0, tail = 0;
+  let playAddr = '', lastSendAt = 0, sending = false, holdUntil = 0;
+  const relays = Array.isArray(CFG.relays) ? CFG.relays : [];
+  let relayIx = 0;
+  const sendGap = () => (relays.length ? PLAY.relayGapMs : PLAY.sendGapMs);
+  const nextDest = () => (relays.length ? relays[relayIx++ % relays.length] : playAddr);
+  const pstat = { sentInputs: 0, batches: 0, resent: 0, rejected: 0, dropped: 0, lost: 0 };
 
   function onKey(e, down) {
     const k = KEYMAP[e.code];
@@ -280,76 +296,118 @@
     if (down) keys.add(k); else keys.delete(k);
   }
   function sample() {
-    const turn = (keys.has('left') ? PLAY.turn : 0) - (keys.has('right') ? PLAY.turn : 0);   // angle grows counter-clockwise
-    const fwd = (keys.has('fwd') ? 1 : 0) - (keys.has('back') ? 1 : 0);
-    const side = (keys.has('sright') ? 1 : 0) - (keys.has('sleft') ? 1 : 0);
+    const m = stepMul();
+    const turn = ((keys.has('left') ? 6 : 0) - (keys.has('right') ? 6 : 0)) * m;   // angle grows counter-clockwise
+    const fwd = ((keys.has('fwd') ? 1 : 0) - (keys.has('back') ? 1 : 0)) * m;
+    const side = ((keys.has('sright') ? 1 : 0) - (keys.has('sleft') ? 1 : 0)) * m;
     let fire = 0;
     if (fireEdge) { fire = 1; fireEdge = false; fireHold = PLAY.fireEvery; }
     else if (keys.has('fire') && --fireHold <= 0) { fire = 1; fireHold = PLAY.fireEvery; }
-    if (turn || fwd || side || fire) tail = PLAY.tail;
-    else if (tail > 0) tail--;          // a few idle frames after the last key: lets the flash/bob settle
-    else return;
-    pending.push([turn, fwd, side, fire]);
-    // first input after a pause: do not wait for the batch timer
-    if (pending.length === 1 && performance.now() - lastFlushAt > PLAY.batchMs) flush(playAddr);
+    if (turn || fwd || side || fire) { tail = PLAY.tail; pending.push([turn, fwd, side, fire]); }
+    else if (tail > 0) { tail--; pending.push([turn, fwd, side, fire]); }   // a few idle frames after the last key: lets the flash/bob settle
+    if (pending.length > PLAY.maxPending) { pstat.dropped += pending.length - PLAY.maxPending; pending = pending.slice(-PLAY.maxPending); }   // stay responsive when the chain lags
+    maybeSend();
+    maybeResend();
+  }
+  function maybeSend() {
+    const now = performance.now();
+    if (sending || !pending.length || sent.length >= PLAY.inFlight || now < holdUntil || now - lastSendAt < sendGap()) return;
+    flush(playAddr);
   }
   async function api(path, body) {
     const r = await fetch(`https://${DEFAULTS.base}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey() }, body: JSON.stringify(body) });
     const text = await r.text();
-    if (!r.ok) { const m = /exitcode=(\d+)/.exec(text); throw new Error('HTTP ' + r.status + (m ? ' exit ' + m[1] : '')); }
+    if (!r.ok) {
+      const m = /exitcode=(\d+)/.exec(text);
+      const why = m ? ' exit ' + m[1] : ' ' + (text.split(/message\s*:|error"\s*:\s*"/).pop() || '').replace(/[\s"}]+/g, ' ').trim().slice(0, 80);
+      throw new Error('HTTP ' + r.status + why);
+    }
     return JSON.parse(text);
   }
   async function getLastBatch(addr) {
     const r = await api('/api/v3/runGetMethod', { address: addr, method: 'lastBatch', stack: [] });
     return parseInt(r.stack[0].value, 16);
   }
-  function tickMessage(addr, id, inputs) {
+  function tickMessage(addr, id, inputs, nonce) {
     const body = Boc.beginCell().storeUint(OP_TICK, 32).storeUint(id, 32).storeUint(inputs.length, 8);
     for (const [t, f, sd, fire] of inputs) body.storeInt(t, 8).storeInt(f, 8).storeInt(sd, 8).storeUint(fire, 8);
+    if (nonce) body.storeUint(nonce, 32);   // resend: a different message hash gets a fresh broadcast
     // ext_in_msg_info$10 src:addr_none dest import_fee:0 init:no body:^Cell
     return Boc.beginCell().storeUint(2, 2).storeUint(0, 2).storeAddress(addr).storeCoins(0).storeBit(0).storeBit(1).storeRef(body.endCell()).endCell();
   }
   async function flush(addr) {
-    if (!pending.length || sent.length >= PLAY.inFlight) return;
+    sending = true;
     const inputs = pending.splice(0, PLAY.maxBatch);
-    const id = nextBatch++;
-    lastFlushAt = performance.now();
-    const rec = { id, inputs, boc: Boc.toBase64(Boc.serialize(tickMessage(addr, id, inputs))), at: performance.now() };
-    sent.push(rec);
-    try { await api('/api/v3/message', { boc: rec.boc }); pstat.batches++; pstat.sentInputs += inputs.length; }
-    catch (e) {
+    const id = lastAck + 1 + sent.length;   // consecutive ids after the last confirmed one
+    let rec = null;
+    try {
+      rec = { id, inputs, boc: Boc.toBase64(Boc.serialize(tickMessage(nextDest(), id, inputs, 0))), at: performance.now(), sentAt: performance.now(), tries: 1 };
+      sent.push(rec); lastSendAt = rec.at;
+      await api('/api/v3/message', { boc: rec.boc }); pstat.batches++; pstat.sentInputs += inputs.length;
+    } catch (e) {
+      pstat.rejected++;
       log(`batch ${id} rejected: ${e.message}`, 'err');
-      sent = sent.filter(r => r !== rec); pending.unshift(...inputs);
-      try { lastAck = await getLastBatch(addr); sent = sent.filter(r => r.id > lastAck); nextBatch = lastAck + 1 + sent.length; } catch (e2) {}
-    }
+      if (rec) sent = sent.filter(r => r !== rec);
+      pending.unshift(...inputs);
+      holdUntil = performance.now() + PLAY.holdMs;   // wait for a confirmation (ack clears it) before trying again
+    } finally { sending = false; }
     showPlayStats();
   }
-  async function ack(addr) {
-    try { lastAck = await getLastBatch(addr); } catch (e) { return; }
+  // called for every transaction we see (ws / poll): the external's body names the batch that landed
+  function ackFromTx(tx) {
+    if (!playing) return;
+    const im = tx.in_msg;
+    if (!im || !im.message_content || !im.message_content.body) return;   // external, or a relay's internal message
+    let id;
+    try { const sl = Boc.parse(Boc.fromBase64(im.message_content.body)).beginParse(); if (sl.loadUint(32) !== OP_TICK) return; id = sl.loadUint(32); } catch (e) { return; }
+    landed(id);
+    // contiguous landed batches from the front are applied for sure; a landed batch further ahead may still wait
+    while (sent.length && sent[0].landed && sent[0].id === lastAck + 1) { lastAck = sent.shift().id; holdUntil = 0; }
+  }
+  function landed(id) {   // the external of batch `id` is in a block: it was applied, or it waits in the reorder buffer
+    for (const r of sent) if (r.id === id) r.landed = true;
+  }
+  function confirmUpTo(id) {   // the contract's lastBatch reached id: batches before it that never landed were skipped
+    if (id <= lastAck) return;
+    const gone = sent.filter(r => r.id <= id && !r.landed);
+    if (gone.length) { pstat.lost += gone.length; log(`batch${gone.length > 1 ? 'es' : ''} ${gone.map(r => r.id).join(',')} lost in the mempool, skipped by the contract`, 'warn'); }
+    lastAck = id; holdUntil = 0;
     sent = sent.filter(r => r.id > lastAck);
-    const now = performance.now();
-    for (const r of sent) {
-      if (now - r.at > PLAY.resendMs) {
-        r.at = now; pstat.resent++;
-        log(`batch ${r.id} not applied in ${PLAY.resendMs / 1000}s, resending`, 'warn');
-        api('/api/v3/message', { boc: r.boc }).catch(e => log(`resend ${r.id} failed: ${e.message}`, 'err'));
-      }
+  }
+  async function ack(addr) {   // fallback: the get method (lags the stream by ~1 s)
+    let v;
+    try { v = await getLastBatch(addr); } catch (e) { return; }
+    confirmUpTo(v);
+    if (sent.length && sent[0].id !== lastAck + 1) {   // ids drifted (someone else is sending?): start over from the confirmed state
+      log(`batch ids out of sync (confirmed ${lastAck}, in flight ${sent.map(r => r.id).join(',')}), requeueing`, 'warn');
+      pending.unshift(...sent.flatMap(r => r.inputs)); sent = [];
     }
+    maybeResend();
     showPlayStats();
+  }
+  function maybeResend() {
+    const now = performance.now();
+    const r = sent.find(x => !x.landed);   // the oldest batch not seen in a block: the contract waits for it up to 2 s
+    if (!r || sending || now - lastSendAt < sendGap() || r.tries > PLAY.maxResends) return;
+    if (now - r.sentAt < PLAY.resendMs || now - r.at < PLAY.resendEveryMs) return;
+    r.at = now; lastSendAt = now; r.tries++; pstat.resent++;
+    const boc = Boc.toBase64(Boc.serialize(tickMessage(nextDest(), r.id, r.inputs, (Math.random() * 0xffffffff) >>> 0)));
+    api('/api/v3/message', { boc }).catch(e => { if (!/exit 132/.test(e.message)) log(`resend ${r.id}: ${e.message}`, 'warn'); });
   }
   function showPlayStats() {
     $('playstats').textContent = playing
-      ? `keys ${[...keys].join(' ') || '-'}   pending ${pending.length}   in flight ${sent.length} (last acked batch ${lastAck})   sent ${pstat.sentInputs} inputs in ${pstat.batches} batches, resent ${pstat.resent}`
+      ? `keys ${[...keys].join(' ') || '-'}   pending ${pending.length}   unconfirmed ${sent.length} (confirmed batch ${lastAck})   sent ${pstat.sentInputs} inputs in ${pstat.batches} batches, resent ${pstat.resent}, lost ${pstat.lost}, rejected ${pstat.rejected}, dropped ${pstat.dropped}`
       : '';
   }
   async function startPlay() {
     const addr = $('addr').value.trim();
     if (!apiKey()) { log('play needs the toncenter API key: run python3 tools/viewer_config.py and open the viewer locally', 'err'); return; }
     try { lastAck = await getLastBatch(addr); } catch (e) { log('cannot read lastBatch: ' + e.message, 'err'); return; }
-    nextBatch = lastAck + 1; sent = []; pending = []; keys.clear(); tail = 0; playAddr = addr; lastFlushAt = 0;
+    sent = []; pending = []; keys.clear(); tail = 0; playAddr = addr; lastSendAt = 0; holdUntil = 0; sending = false;
     playing = true; $('play').classList.add('on'); $('hint').hidden = false; $('about').hidden = true; $('about-play').hidden = false;
-    timers = [setInterval(sample, 1000 / PLAY.rate), setInterval(() => flush(addr), PLAY.batchMs), setInterval(() => ack(addr), 1000)];
-    log(`play: batches start at ${nextBatch}; arrows/WASD move, space fires`);
+    PLAY.rate = Number($('rate').value) || 10;
+    timers = [setInterval(sample, 1000 / PLAY.rate), setInterval(() => ack(addr), PLAY.ackMs)];
+    log(`play: confirmed batch ${lastAck}; ${PLAY.rate} inputs/s${relays.length ? `, ${relays.length} input relays` : ''}; arrows/WASD move, space fires`);
     showPlayStats();
   }
   function stopPlay() {
@@ -360,7 +418,8 @@
   window.addEventListener('keyup', (e) => onKey(e, false));
   window.addEventListener('blur', () => keys.clear());
   $('play').onclick = () => (playing ? stopPlay() : startPlay());
-  if (hosted) $('play').hidden = true;
+  $('rate').onchange = () => { if (playing) { stopPlay(); startPlay(); } };
+  if (hosted) { $('play').hidden = true; $('rateopt').hidden = true; }
 
   $('connect').onclick = () => (ws ? disconnect() : connectWs());
   $('poll').onclick = () => (pollTimer ? disconnect() : startPoll());

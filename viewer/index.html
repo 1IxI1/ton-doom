@@ -10,6 +10,7 @@
   header { display: flex; gap: 12px; align-items: center; padding: 8px 12px; background: #161616; flex-wrap: wrap; }
   header input { background: #222; color: #eee; border: 1px solid #444; padding: 4px 6px; font: inherit; }
   header input.addr { width: 46ch; }
+  header select { background: #222; color: #eee; border: 1px solid #444; padding: 4px 6px; font: inherit; }
   header button { background: #333; color: #eee; border: 1px solid #555; padding: 4px 10px; font: inherit; cursor: pointer; }
   header button.on { background: #2a5; color: #000; }
   #about, #about-play { margin: 0; padding: 8px 12px 0; color: #999; max-width: 90ch; }
@@ -39,6 +40,7 @@
   <button id="poll">poll mode</button>
   <button id="pause">pause</button>
   <button id="play">play</button>
+  <label id="rateopt" title="inputs per second = on-chain frames per second; 10/s moves as fast (double steps) at half the gas and keeps the chain from lagging behind"><select id="rate"><option value="10" selected>10 inputs/s</option><option value="20">20 inputs/s</option></select></label>
   <label id="pendingopt" title="min_finality=pending: toncenter emulates the transactions on receipt, ~0.3 s instead of ~1 s; frames are marked EMULATED until the block confirms them"><input type="checkbox" id="pending"> pending frames (emulated)</label>
   <span id="status" class="warn">idle</span>
   <span id="hint" hidden>arrows / WASD walk and turn, A D strafe, space fires (inputs go to the chain in batches; ~1.5 s to the screen)</span>

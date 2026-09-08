@@ -45,6 +45,9 @@ const SIN_PER_LEAF = 56;
 const SIN_BITS = 18;
 const INPUT_BITS = 32;            // turn:int8 fwd:int8 side:int8 flags:uint8 (bit 0: fire)
 const MAX_INPUTS = 29;            // per external message (op:32 batchId:32 count:8 + 29 x 32 bits fit in one cell)
+const MAX_BATCH_SKIP = 64;        // a batch id may run at most this far ahead of lastBatch (lost batches are skipped)
+const HELD_MAX = 3;               // reorder buffer: when a 4th batch is waiting, or the oldest waited HELD_MAX_AGE
+const HELD_MAX_AGE = 2;           // seconds, the batches before it are declared lost and skipped
 const GAS_BUDGET = 930000;        // hard stop for rendering work (leaves ~70k: weapon overlay ~18k, pack, emit, save, continue)
 const GAS_NODE_MARGIN = 25000;    // a node/subsector visit may add this much before the next check
 // (the per-run column guard, 2600 gas per column and the same budget, is baked into the generated seg drawers:
@@ -107,7 +110,7 @@ struct Storage {
     lastBatch: uint32  // id of the last batch appended to the queue
     qpos: uint8        // inputs already consumed from the head queue cell
     queue: cell?       // FIFO of inputs: cells [count:8, count x (turn:int8 fwd:int8 side:int8 flags:uint8)], ref0 = next
-    held: cell?        // batch lastBatch+2 that arrived before lastBatch+1 (reorder buffer of one batch)
+    held: cell?        // reorder buffer: batches that arrived ahead of lastBatch+1, sorted by id (see heldInsert)
     owner: address     // may withdraw the balance (internal message with op WDRW)
     auto: bool         // the wanderer AI drives the player when the queue is empty
     turnDir: int8      // AI: current turning episode direction (-1, 0, +1)
@@ -694,6 +697,66 @@ fun emitFrame(st: Storage, viewz: int, pixels: cell, queued: int) {
 // Input queue
 // ---------------------------------------------------------------------------------------------
 // Append a batch cell [count:8, inputs...] at the tail of the queue (rebuilds the spine).
+// Reorder buffer: a sorted linked list of cells [id:32 at:32] ref0 = batch, ref1 = next. Returns (list, dup).
+fun heldInsert(held: cell?, id: int, at: int, batch: cell): (cell, bool) {
+    if (held == null) {
+        return (beginCell().storeUint(id, 32).storeUint(at, 32).storeRef(batch).endCell(), false);
+    }
+    var s = held!.beginParse();
+    val hid = s.loadUint(32);
+    val hat = s.loadUint(32);
+    val hbatch = s.loadRef();
+    val next: cell? = s.remainingRefsCount() > 0 ? s.loadRef() : null;
+    if (id == hid) {
+        return (held, true);
+    }
+    if (id < hid) {
+        return (beginCell().storeUint(id, 32).storeUint(at, 32).storeRef(batch).storeRef(held).endCell(), false);
+    }
+    val (rest, dup) = heldInsert(next, id, at, batch);
+    return (beginCell().storeUint(hid, 32).storeUint(hat, 32).storeRef(hbatch).storeRef(rest).endCell(), dup);
+}
+
+fun heldCount(held: cell?): int {
+    var n = 0;
+    var c = held;
+    while (c != null) {
+        var s = c!.beginParse();
+        s.skipBits(64);
+        s.loadRef();
+        c = s.remainingRefsCount() > 0 ? s.loadRef() : null;
+        n += 1;
+    }
+    return n;
+}
+
+// Move held batches that are next in line into the queue; first skip the gap in front of the oldest held
+// batch if the buffer is full or the batch waited too long (its predecessors were lost in the mempool).
+fun drainHeld(mutate st: Storage, now: int) {
+    if (st.held == null) {
+        return;
+    }
+    var s = st.held!.beginParse();
+    val hid = s.loadUint(32);
+    val hat = s.loadUint(32);
+    if ((hid > st.lastBatch + 1) & ((heldCount(st.held) > HELD_MAX) | (now - hat >= HELD_MAX_AGE))) {
+        st.lastBatch = hid - 1;
+    }
+    var more = true;
+    while (more & (st.held != null)) {
+        var h = st.held!.beginParse();
+        val id = h.loadUint(32);
+        h.skipBits(32);
+        if (id == st.lastBatch + 1) {
+            st.queue = appendBatch(st.queue, h.loadRef());
+            st.lastBatch = id;
+            st.held = h.remainingRefsCount() > 0 ? h.loadRef() : null;
+        } else {
+            more = false;
+        }
+    }
+}
+
 fun appendBatch(queue: cell?, batch: cell): cell {
     if (queue == null) {
         return batch;
@@ -846,6 +909,14 @@ fun onInternalMessage(in: InMessage) {
     if (in.body.isEmpty()) {
         return;   // plain top-up
     }
+    val op = in.body.preloadUint(32);
+    if ((op == OP_TICK) | (op == OP_START) | (op == OP_STOP) | (op == OP_RESET)) {
+        // a command relayed by an input contract (see Relay.tolk): same body as the external form. The
+        // attached value buys the gas limit and stays here. Invalid / old batches are ignored (never
+        // thrown: the sender is a contract).
+        handleCommand(in.body, false);
+        return;
+    }
     val msg = lazy InternalMsg.fromSlice(in.body);
     match (msg) {
         Continue => {
@@ -871,19 +942,33 @@ fun onInternalMessage(in: InMessage) {
 }
 
 fun onExternalMessage(inBody: slice) {
+    handleCommand(inBody, true);
+}
+
+// Commands (TICK / START / STOP / RESET) from an external message or relayed by an internal one. For
+// externals, checks happen before ACCEPT so that rejected messages are free; for relayed commands the
+// same checks silently drop the command instead of throwing.
+fun handleCommand(inBody: slice, isExternal: bool) {
     var body = inBody;
     val op = body.loadUint(32);
     val batchId = body.loadUint(32);
     var st = Storage.load();
-    // ordering: batch lastBatch+1 is appended right away; lastBatch+2 may arrive first (same block, random
-    // order) and is held until lastBatch+1 lands. Anything else is rejected before ACCEPT (free) and the
-    // sender re-sends it later. This lets the sender keep two batches in flight.
-    val isNext = batchId == st.lastBatch + 1;
-    assert (isNext | ((batchId == st.lastBatch + 2) & (st.held == null))) throw ERR_OLD_BATCH;
+    // ordering, like a game over UDP: batch lastBatch+1 is appended right away; batches ahead of it (same
+    // block, random order; or their predecessor is late) wait in a small reorder buffer; when the buffer
+    // is full or the oldest waited HELD_MAX_AGE seconds, the batches before it are declared lost in the
+    // mempool and skipped (a late arrival is then rejected as old), so a lost batch costs its own inputs,
+    // not a stall. Old / duplicate ids are rejected before ACCEPT (free).
+    val ahead = batchId - st.lastBatch;
+    if (!((ahead >= 1) & (ahead <= MAX_BATCH_SKIP))) {
+        assert (!isExternal) throw ERR_OLD_BATCH;
+        return;
+    }
     if ((op == OP_START) | (op == OP_STOP)) {
-        assert (isNext) throw ERR_OLD_BATCH;
-        acceptExternalMessage();
+        if (isExternal) {
+            acceptExternalMessage();
+        }
         st.lastBatch = batchId;
+        st.held = null;
         val wasAuto = st.auto;
         st.auto = op == OP_START;
         st.turnDir = 0;
@@ -897,12 +982,13 @@ fun onExternalMessage(inBody: slice) {
         return;
     }
     if (op == OP_RESET) {
-        assert (isNext) throw ERR_OLD_BATCH;
         // body: op:32 batchId:32 px:int32 py:int32 angle:uint16 (16.16 map units)
         val px = body.loadInt(32);
         val py = body.loadInt(32);
         val angle = body.loadUint(16);
-        acceptExternalMessage();
+        if (isExternal) {
+            acceptExternalMessage();
+        }
         st.px = px;
         st.py = py;
         st.angle = angle & ANGLE_MASK;
@@ -913,25 +999,36 @@ fun onExternalMessage(inBody: slice) {
         st.save();
         return;
     }
-    assert (op == OP_TICK) throw ERR_BAD_OP;
-    val count = body.loadUint(8);
-    assert ((count > 0) & (count <= MAX_INPUTS)) throw ERR_BAD_COUNT;
-    acceptExternalMessage();
-
-    // enqueue the batch: [count:8, count x INPUT_BITS]
-    val batch = beginCell().storeUint(count, 8).storeSlice(body.getFirstBits(count * INPUT_BITS)).endCell();
-    if (!isNext) {
-        st.held = batch;      // lastBatch+2 before lastBatch+1: hold it
-        st.save();
+    if (op != OP_TICK) {
+        assert (!isExternal) throw ERR_BAD_OP;
         return;
     }
-    st.queue = appendBatch(st.queue, batch);
-    st.lastBatch = batchId;
-    if (st.held != null) {
-        st.queue = appendBatch(st.queue, st.held!);
-        st.held = null;
-        st.lastBatch = batchId + 1;
+    val count = body.loadUint(8);
+    if (!((count > 0) & (count <= MAX_INPUTS))) {
+        assert (!isExternal) throw ERR_BAD_COUNT;
+        return;
     }
+    // the batch: [count:8, count x INPUT_BITS] (trailing bits, e.g. a resend nonce, are ignored)
+    val batch = beginCell().storeUint(count, 8).storeSlice(body.getFirstBits(count * INPUT_BITS)).endCell();
+    val now = blockchain.now();
+    if (ahead == 1) {
+        if (isExternal) {
+            acceptExternalMessage();
+        }
+        st.queue = appendBatch(st.queue, batch);
+        st.lastBatch = batchId;
+    } else {
+        val (held, dup) = heldInsert(st.held, batchId, now, batch);
+        if (dup) {   // already waiting (a resend)
+            assert (!isExternal) throw ERR_OLD_BATCH;
+            return;
+        }
+        if (isExternal) {
+            acceptExternalMessage();
+        }
+        st.held = held;
+    }
+    drainHeld(mutate st, now);
     st.save();
     commitContractDataAndActions();
     step(mutate st, 0);

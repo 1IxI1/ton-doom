@@ -33,11 +33,19 @@ Every transaction there is one rendered frame.
   `contracts/render-asm.tolk` — the hot column loops as hand-written TVM assembly, generated and verified
   by `tools/asmgen.py` + `tools/stacksim.py`.
 * External `DOOM` message: `op:32 batchId:32 count:8 (turn:int8 fwd:int8 side:int8 flags:uint8) x count`
-  (flags bit 0 = fire). Batches must arrive in order (`batchId == lastBatch + 1`, or `+ 2` for one batch
-  that overtook its predecessor); anything else is rejected before `ACCEPT` (free). Inputs are queued in the
-  contract state; every transaction pops one input, moves the player (blockmap collisions, sliding along
-  walls like Doom), renders and emits the frame, then sends itself a `CONT` message if the queue is not
-  empty. Frames therefore continue across blocks at up to the block gas limit (~10 frames per 0.4 s block).
+  (flags bit 0 = fire). Batch ids are consecutive: `lastBatch + 1` is applied at once, batches that arrive
+  ahead of it (same block, random order) wait in a 3-slot reorder buffer, and when the buffer is full or
+  the oldest waited 2 s the batches before it are declared lost and skipped, like a game over UDP; old or
+  duplicate ids are rejected before `ACCEPT` (free). Inputs are queued in the contract state; every
+  transaction pops one input, moves the player (blockmap collisions, sliding along walls like Doom),
+  renders and emits the frame, then sends itself a `CONT` message if the queue is not empty. Frames
+  therefore continue across blocks at up to the block gas limit (~10 frames per 0.4 s block).
+* **Input relays** (`contracts/Relay.tolk`): the mempool caps pending external messages per address and
+  sometimes never delivers one, which made a player's input stream stall. A relay accepts the same command
+  as an external and forwards it to the Doom contract as an internal message (same block, no extra
+  latency); the same commands are accepted by the Doom contract from internal messages. The viewer sends
+  batches to 50 relays in turn (`scripts/deploy-relays.tolk` deploys them with the same top address bits
+  as the Doom contract, so a shard split keeps them together).
 * A gas guard keeps every transaction under 1M gas: when the budget is hit, the frame is emitted partial
   (`flags & 1`) instead of failing.
 * **Wanderer AI on-chain** (`STRT` / `STOP` externals): when the input queue is empty the contract drives
@@ -52,14 +60,14 @@ Every transaction there is one rendered frame.
   frame hashes). `tools/golden.py` builds golden frames, `tools/level_encode.py` packs E1M1 into cells,
   `tools/wad.py` parses the WAD, `tools/boc.py` is a dependency-free BOC/cell library.
 * `viewer/index.html` — the viewer (WebSocket streaming, `min_finality: confirmed`, adaptive playback).
-  With a local `config.js` (API key) it also has a **play** mode: arrows / WASD walk and turn, space
-  fires; key samples (20/s) are packed into one external message per 0.5 s (`viewer/boc.js` builds the
-  BOC in the browser), confirmed through the `lastBatch` get method and resent if a batch gets lost.
-  About 0.6–0.9 s from key press to the frame on screen (the first input after a pause is sent at once,
-  then one batch per 0.4 s; the rest is block inclusion + streaming). The "pending frames" option
-  subscribes with `min_finality: pending`: toncenter emulates the transactions on receipt and the frames
-  arrive in ~0.35 s, marked EMULATED (orange border) until the block confirms them; the confirmed frame
-  is compared with the emulated one and corrections are counted.
+  With a local `config.js` (API key, relay addresses) it also has a **play** mode: arrows / WASD walk and
+  turn, space fires; key samples (10/s, double steps) are packed into small batches (`viewer/boc.js`
+  builds the BOC in the browser) sent to the relays every 0.3 s, confirmed from the transaction stream
+  and resent once with a nonce if a batch does not land. Measured: 0.8 s from key press to the frame on
+  screen, no stalls over 45 s of continuous play. The "pending frames" option subscribes with
+  `min_finality: pending`: toncenter emulates the transactions on receipt and the frames arrive in ~0.35 s,
+  marked EMULATED (orange border) until the block confirms them; the confirmed frame is compared with the
+  emulated one and corrections are counted.
 * `tools/doom.py` — CLI: send inputs, run the autopilot demo feeder, dump frames as PNG.
 
 ## Running
@@ -73,8 +81,8 @@ python3 tools/doom.py demo --rate 25 --batch 29   # feed the scripted E1M1 walk 
 python3 tools/viewer_config.py && open viewer/index.html   # viewer config (address, key) from .env
 ```
 
-`.env` (not committed) holds `TONCENTER_TESTNET_API_KEY=...` and `DOOM_ADDRESS=...` (printed by the deploy
-script). Needs `assets/doom1.wad` (shareware; `python3 tools/wad.py assets/doom1.wad E1M1 --json assets/e1m1.json`,
+`.env` (not committed) holds `TONCENTER_TESTNET_API_KEY=...`, `DOOM_ADDRESS=...` (printed by the deploy
+script) and, for play mode, `DOOM_RELAYS=a,b,c` (printed by `scripts/deploy-relays.tolk`). Needs `assets/doom1.wad` (shareware; `python3 tools/wad.py assets/doom1.wad E1M1 --json assets/e1m1.json`,
 then `python3 tools/level_encode.py assets/e1m1.json assets/e1m1-level.boc` packs the level, blockmap and sprite).
 
 ## Numbers (testnet, 80x120 shown at 4:3)

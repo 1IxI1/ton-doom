@@ -10,6 +10,7 @@ import "@acton/types/message"
 import "@acton/types/big_array"
 
 import "@contracts/Doom"
+import "@contracts/Relay"
 
 // Golden data produced by tools/golden.py (see its docstring for the layout).
 struct Golden {
@@ -213,29 +214,48 @@ get fun `test bad opcode is rejected before accept`() {
     expect(res).toBeNotAccepted();
 }
 
-get fun `test batch ordering with a one-batch reorder buffer`() {
+get fun `test batch ordering: reorder buffer, lost batches skipped, old ids rejected`() {
     val level = loadLevel();
     val g = loadGolden("assets/golden/walk.boc");
     val (addr, _) = deployDoom(level);
-    // batch 3 before batch 1: rejected before accept (only lastBatch+1 and lastBatch+2 are accepted)
-    expect(net.sendExternal(net.createExternalMessage(addr, tickBody(g, 4, 2, 3)))).toBeNotAccepted();
-    // batch 2 before batch 1: held
+    testing.setNow(2000000000);
+    // batches 3, 2 arrive before 1 (same block, random order): held, nothing rendered
+    expect(net.sendExternal(net.createExternalMessage(addr, tickBody(g, 4, 2, 3)))).toBeAccepted();
     expect(net.sendExternal(net.createExternalMessage(addr, tickBody(g, 2, 2, 2)))).toBeAccepted();
     expect(net.runGetMethod<int>(addr, "lastBatch")).toEqual(0);
     expect(net.runGetMethod<int>(addr, "queued")).toEqual(0);
-    // a second early batch while one is held: rejected
+    // a duplicate of a held batch: rejected before accept
     expect(net.sendExternal(net.createExternalMessage(addr, tickBody(g, 2, 2, 2)))).toBeNotAccepted();
-    // batch 1 arrives: appended, then the held batch 2 follows it in order
+    // batch 1 arrives: 1, 2, 3 are queued in order and rendered exactly like the golden walk
     val res = net.sendExternal(net.createExternalMessage(addr, tickBody(g, 0, 2, 1)));
     expect(res).toBeAccepted();
     expect(res.unwrap()).toHaveAllSuccessfulTxs();
-    expect(net.runGetMethod<int>(addr, "lastBatch")).toEqual(2);
-    // the four inputs were rendered in golden order (frames 1..4)
-    checkFrames(res.unwrap(), g, 0, 4, false);
-    // duplicate of batch 2: rejected; batch 3 accepted; batch 4 accepted (held: nothing pending) then rendered
-    expect(net.sendExternal(net.createExternalMessage(addr, tickBody(g, 2, 2, 2)))).toBeNotAccepted();
-    expect(net.sendExternal(net.createExternalMessage(addr, tickBody(g, 4, 2, 3)))).toBeAccepted();
     expect(net.runGetMethod<int>(addr, "lastBatch")).toEqual(3);
+    checkFrames(res.unwrap(), g, 0, 6, false);
+    // old ids: rejected before accept
+    expect(net.sendExternal(net.createExternalMessage(addr, tickBody(g, 2, 2, 2)))).toBeNotAccepted();
+    expect(net.sendExternal(net.createExternalMessage(addr, tickBody(g, 0, 1, 0)))).toBeNotAccepted();
+    // batch 4 lost: 5, 6, 7 wait in the buffer (3 slots); the 4th waiting batch (8) declares 4 lost
+    expect(net.sendExternal(net.createExternalMessage(addr, tickBody(g, 8, 2, 5)))).toBeAccepted();
+    expect(net.sendExternal(net.createExternalMessage(addr, tickBody(g, 10, 2, 6)))).toBeAccepted();
+    expect(net.sendExternal(net.createExternalMessage(addr, tickBody(g, 12, 2, 7)))).toBeAccepted();
+    expect(net.runGetMethod<int>(addr, "lastBatch")).toEqual(3);
+    val res2 = net.sendExternal(net.createExternalMessage(addr, tickBody(g, 14, 2, 8)));
+    expect(res2).toBeAccepted();
+    expect(net.runGetMethod<int>(addr, "lastBatch")).toEqual(8);
+    expect(net.runGetMethod<int>(addr, "frameNo")).toEqual(14);   // 6 + inputs of batches 5..8
+    // the lost batch 4 shows up late: rejected; too far ahead: rejected
+    expect(net.sendExternal(net.createExternalMessage(addr, tickBody(g, 6, 2, 4)))).toBeNotAccepted();
+    expect(net.sendExternal(net.createExternalMessage(addr, tickBody(g, 16, 2, 8 + 65)))).toBeNotAccepted();
+    // age based skip: batch 10 waits alone; 2 s later batch 11 arrives and 9 is declared lost
+    expect(net.sendExternal(net.createExternalMessage(addr, tickBody(g, 16, 2, 10)))).toBeAccepted();
+    testing.setNow(2000000001);
+    expect(net.sendExternal(net.createExternalMessage(addr, tickBody(g, 18, 2, 12)))).toBeAccepted();   // still waiting
+    expect(net.runGetMethod<int>(addr, "lastBatch")).toEqual(8);
+    testing.setNow(2000000002);
+    expect(net.sendExternal(net.createExternalMessage(addr, tickBody(g, 20, 2, 11)))).toBeAccepted();
+    expect(net.runGetMethod<int>(addr, "lastBatch")).toEqual(12);
+    expect(net.runGetMethod<int>(addr, "frameNo")).toEqual(20);
 }
 
 get fun `test reset teleports the player and drops the queue`() {
@@ -331,4 +351,29 @@ get fun `test a frame that runs out of gas bounces and the chain goes on`() {
     expect(frames + failed).toEqual(n);
     expect(net.runGetMethod<int>(addr, "frameNo")).toEqual(n);
     expect(net.runGetMethod<int>(addr, "queued")).toEqual(0);
+}
+
+get fun `test inputs relayed by an input contract render like direct externals`() {
+    val level = loadLevel();
+    val g = loadGolden("assets/golden/walk.boc");
+    val (doom, deployer) = deployDoom(level);
+    // deploy a relay pointing at Doom
+    val relayInit: ContractState = { code: build("Relay"), data: RelayStorage { doom, owner: deployer.address, id: 7 }.toCell() };
+    val relay = AutoDeployAddress { stateInit: relayInit }.calculateAddress();
+    net.registerAddress(relay, "relay");
+    expect(net.send(deployer.address, createMessage({ bounce: false, value: grams("5"), dest: { workchain: BASECHAIN, stateInit: relayInit } }))).toHaveSuccessfulDeploy({ to: relay });
+    expect(net.runGetMethod<address>(relay, "relayTarget")).toEqual(doom);
+    // the walk's first 10 inputs through the relay: forwarded as one internal message, rendered in order
+    val res = net.sendExternal(net.createExternalMessage(relay, tickBody(g, 0, 10, 1)));
+    expect(res).toBeAccepted();
+    expect(res.unwrap()).toHaveAllSuccessfulTxs();
+    checkFrames(res.unwrap(), g, 0, 10, true);
+    expect(net.runGetMethod<int>(doom, "lastBatch")).toEqual(1);
+    // an old batch through the relay is dropped silently (no bounce, no throw), nothing rendered
+    val res2 = net.sendExternal(net.createExternalMessage(relay, tickBody(g, 0, 2, 1)));
+    expect(res2).toBeAccepted();
+    expect(res2.unwrap()).toHaveAllSuccessfulTxs();
+    expect(net.runGetMethod<int>(doom, "frameNo")).toEqual(10);
+    // junk to the relay is rejected before accept
+    expect(net.sendExternal(net.createExternalMessage(relay, beginCell().storeUint(0x12345678, 32).storeUint(1, 32).endCell()))).toBeNotAccepted();
 }
