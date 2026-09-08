@@ -19,9 +19,9 @@ streaming API and plays the frames back.
 Nothing is rendered off-chain: only `turn / forward / strafe` inputs go to the chain, and in the live
 deployment not even those: the player is an on-chain AI.
 
-Live contract (testnet): [`kQBfL0vdKQ0cZlSfqPyni47l_unOrWQJk5R71c7mBefTYKy2`](https://testnet.tonviewer.com/kQBfL0vdKQ0cZlSfqPyni47l_unOrWQJk5R71c7mBefTYKy2)
-(also on [actonscan](https://actonscan.com/address/kQBfL0vdKQ0cZlSfqPyni47l_unOrWQJk5R71c7mBefTYKy2?network=testnet)).
-Every transaction there is one rendered frame.
+Live AI demo (testnet): [`kQBThgWdct9avKvRxYsCC3QKKZLmLAmmY5GYCFVkYR-gsn-t`](https://testnet.tonviewer.com/kQBThgWdct9avKvRxYsCC3QKKZLmLAmmY5GYCFVkYR-gsn-t)
+(also on [actonscan](https://actonscan.com/address/kQBThgWdct9avKvRxYsCC3QKKZLmLAmmY5GYCFVkYR-gsn-t?network=testnet)).
+Every transaction there is one rendered frame; the four play servers are listed in `assets/servers.json`.
 
 ## How it works
 

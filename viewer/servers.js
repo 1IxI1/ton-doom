@@ -228,6 +228,6 @@ window.DOOM_SERVERS = {
  ],
  "demo": {
   "name": "AI demo (watch only)",
-  "addr": "kQBfL0vdKQ0cZlSfqPyni47l_unOrWQJk5R71c7mBefTYKy2"
+  "addr": "kQBThgWdct9avKvRxYsCC3QKKZLmLAmmY5GYCFVkYR-gsn-t"
  }
 };

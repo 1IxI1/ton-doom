@@ -54,10 +54,11 @@
   }
 
   // ---- servers -----------------------------------------------------------------------------------
-  const servers = [...SRV.servers];
-  if (SRV.demo) servers.push({ ...SRV.demo, watchOnly: true });
+  const servers = [];
+  if (SRV.demo) servers.push({ ...SRV.demo, watchOnly: true });   // first and selected by default
+  servers.push(...SRV.servers);
   if (params.get('addr')) servers.unshift({ name: 'custom ' + params.get('addr').slice(0, 8), addr: params.get('addr'), relays: [] });
-  const status = new Map();   // addr -> { lastStep, frameNo, at }
+  const status = new Map();   // addr -> { lastStep, at }
   let current = servers[0] || { name: '-', addr: '', relays: [] };
   const currentAddr = () => current.addr;
   const relays = () => (current.relays || []);
@@ -543,13 +544,8 @@
   $('poll').onclick = () => (pollTimer ? disconnect() : startPoll());
   $('pause').onclick = () => { paused = !paused; $('pause').classList.toggle('on', paused); };
 
-  // start: pick the first free server once the statuses are in (the demo if none), then connect
+  // start on the AI demo (or ?addr=), connect, then fill in the server statuses
   renderServers();
-  (async () => {
-    applyMode();
-    await probeAll();
-    const free = servers.find(sv => !sv.watchOnly && isFree(sv));
-    if (free && free.addr !== current.addr && !params.get('addr')) selectServer(free.addr);
-    else if (!free && !params.get('addr') && SRV.demo) selectServer(SRV.demo.addr);
-  })();
+  applyMode();
+  probeAll();
 })();
