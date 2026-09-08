@@ -59,6 +59,24 @@ def tokenize(src: str):
     return src.replace("\n", " ").split()
 
 
+def _has_else(toks, i):
+    """Does the IF block starting at toks[i] have an ELSE at depth 1?"""
+    depth = 1
+    j = i
+    while depth and j < len(toks):
+        tk = toks[j]
+        if tk == "}>ELSE<{" and depth == 1:
+            return True
+        if tk == "}>DO<{" or tk == "}>ELSE<{":
+            pass
+        elif tk.endswith("<{"):
+            depth += 1
+        elif tk == "}>":
+            depth -= 1
+        j += 1
+    return False
+
+
 def run(st: Stack, src: str, trace=False):
     toks = tokenize(src)
     i = 0
@@ -121,6 +139,15 @@ def run(st: Stack, src: str, trace=False):
             for _ in range(n):
                 st.pop()
             gas(26)
+        elif op == "BLKDROP2":
+            i_, j_ = a
+            top = [st.pop() for _ in range(j_)][::-1]
+            for _ in range(i_):
+                st.pop()
+            for v in top: st.push(v)
+            gas(26)
+        elif op == "GASCONSUMED":
+            st.push(st.gas); gas(26)
         elif op == "BLKSWAP":
             n, m_ = a
             top = [st.pop() for _ in range(m_)][::-1]
@@ -168,6 +195,10 @@ def run(st: Stack, src: str, trace=False):
             if not 0 <= n <= 1023:
                 raise ValueError(f"LSHIFT range {n}")
             st.push(sgn257(st.pop() << n)); gas(18)
+        elif op == "POW2":
+            n = st.pop()
+            if not 0 <= n <= 1023: raise ValueError(f"POW2 range {n}")
+            st.push(sgn257(1 << n)); gas(18)
         elif op == "PUSHPOW2DEC":
             (n,) = a
             st.push((1 << n) - 1); gas(26)
@@ -177,6 +208,39 @@ def run(st: Stack, src: str, trace=False):
         elif op == "PUSHINT":
             (n,) = a
             st.push(n); gas(18 if -5 <= n <= 10 else (26 if -128 <= n <= 127 else 34))
+        elif op == "POP":
+            (k,) = a
+            v = st.pop(); st.set_s(k - 1, v); gas(18)
+        elif op == "CONDSEL":
+            y = st.pop(); x = st.pop(); c = st.pop(); st.push(x if c != 0 else y); gas(26)
+        elif op in ("LESS", "LEQ", "GREATER", "GEQ", "EQUAL", "NEQ"):
+            y = st.pop(); x = st.pop()
+            r = {"LESS": x < y, "LEQ": x <= y, "GREATER": x > y, "GEQ": x >= y, "EQUAL": x == y, "NEQ": x != y}[op]
+            st.push(-1 if r else 0); gas(18)
+        elif op in ("LESSINT", "GTINT", "EQINT", "NEQINT"):
+            (n,) = a; x = st.pop()
+            r = {"LESSINT": x < n, "GTINT": x > n, "EQINT": x == n, "NEQINT": x != n}[op]
+            st.push(-1 if r else 0); gas(26)
+        elif op == "ISZERO":
+            st.push(-1 if st.pop() == 0 else 0); gas(18)
+        elif op == "DIV":
+            y = st.pop(); x = st.pop(); st.push(x // y); gas(26)
+        elif op == "MULDIV":
+            z = st.pop(); y = st.pop(); x = st.pop(); st.push((x * y) // z); gas(26)
+        elif op == "MULCONST":
+            (n,) = a; st.push(sgn257(st.pop() * n)); gas(26)
+        elif op == "ADDCONST":
+            (n,) = a; st.push(sgn257(st.pop() + n)); gas(26)
+        elif op == "UBITSIZE":
+            x = st.pop()
+            if x < 0: raise ValueError("UBITSIZE negative")
+            st.push(x.bit_length()); gas(26)
+        elif op == "INDEX":
+            (k,) = a
+            tup = st.pop()
+            if not isinstance(tup, list):
+                raise TypeError(f"INDEX on non-tuple {fmt(tup)}")
+            st.push(tup[k]); gas(26)
         elif op == "INDEXVAR":
             k = st.pop(); tup = st.pop()
             if not isinstance(tup, list):
@@ -187,14 +251,65 @@ def run(st: Stack, src: str, trace=False):
             if not isinstance(tup, list):
                 raise TypeError(f"SETINDEXVAR on non-tuple {fmt(tup)}")
             tup = list(tup); tup[k] = v; st.push(tup); gas(26 + len(tup))
+        elif op == "WHILE:<{":
+            # WHILE:<{ cond }>DO<{ body }>
+            depth = 1; j = i
+            while True:
+                tk = toks[j]
+                if tk == "}>DO<{" and depth == 1:
+                    j += 1
+                    break
+                if tk == "}>DO<{" or tk == "}>ELSE<{":
+                    pass
+                elif tk.endswith("<{"): depth += 1
+                elif tk == "}>": depth -= 1
+                j += 1
+            cond = " ".join(toks[i : j - 1])
+            depth = 1; k = j
+            while depth:
+                tk = toks[k]
+                if tk == "}>DO<{" or tk == "}>ELSE<{":
+                    pass
+                elif tk.endswith("<{"): depth += 1
+                elif tk == "}>": depth -= 1
+                k += 1
+            body = " ".join(toks[j : k - 1])
+            i = k
+            gas(18)
+            while True:
+                run(st, cond, trace)
+                gas(10)
+                if st.pop() == 0:
+                    break
+                run(st, body, trace)
+        elif op == "IF:<{" and _has_else(toks, i):
+            depth = 1; j = i; else_at = None
+            while depth:
+                tk = toks[j]
+                if tk == "}>ELSE<{" and depth == 1:
+                    else_at = j
+                elif tk == "}>DO<{" or tk == "}>ELSE<{":
+                    pass
+                elif tk.endswith("<{"): depth += 1
+                elif tk == "}>": depth -= 1
+                j += 1
+            if else_at is None:
+                raise ValueError("IF/ELSE parse")
+            then_body = " ".join(toks[i:else_at]); else_body = " ".join(toks[else_at + 1 : j - 1])
+            i = j
+            n = st.pop(); gas(18 + 5)
+            run(st, then_body if n != 0 else else_body, trace)
         elif op in ("REPEAT:<{", "IF:<{", "IFNOT:<{"):
             # find matching }>
             depth = 1
             j = i
             while depth:
-                if toks[j].endswith(":<{") or toks[j] == "<{":
+                tk = toks[j]
+                if tk == "}>DO<{" or tk == "}>ELSE<{":
+                    pass
+                elif tk.endswith("<{"):
                     depth += 1
-                elif toks[j] == "}>":
+                elif tk == "}>":
                     depth -= 1
                 j += 1
             body = " ".join(toks[i : j - 1])

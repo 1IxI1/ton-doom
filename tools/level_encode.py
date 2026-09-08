@@ -9,9 +9,10 @@ Layout (must match contracts/Doom.tolk):
       ref1: sin table root
 
   node cell:
-      bits: c0IsSS:1 c1IsSS:1 test0:1 test1:1 x:int16 y:int16 dx:int16 dy:int16
-            bbox0 (top,bottom,left,right: int16 x4) bbox1 (same)          = 196 bits
-      testN = 1 when the far-child bbox test is worth doing (subtree has > BBOX_TEST_MIN_SS subsectors)
+      bits: d1:3 d0:3 x:int16 y:int16 dx:int16 dy:int16   (d_s = (flags6 >> (3*s)) & 7)
+            bbox0 (top,bottom,left,right: int16 x4) bbox1 (same)          = 198 bits
+      d_s (for the viewer on side s): bit0 = child s is a subsector, bit1 = child 1-s is a subsector,
+            bit2 = the far child (1-s) deserves a bbox test (subtree has >= BBOX_TEST_MIN_SS subsectors)
       ref0: child0 (right / front), ref1: child1 (left / back)
 
   subsector cell:
@@ -76,9 +77,11 @@ def encode_node(level: Level, node, cache) -> Cell:
     for is_ss, idx in node.child:
         children.append(encode_child(level, is_ss, idx, cache))
     b = begin_cell()
-    b.store_uint(1 if node.child[0][0] else 0, 1).store_uint(1 if node.child[1][0] else 0, 1)
-    for side in (0, 1):
-        b.store_uint(1 if subtree_size(level, node.child[side]) >= BBOX_TEST_MIN_SS else 0, 1)
+    is_ss = [1 if node.child[0][0] else 0, 1 if node.child[1][0] else 0]
+    test = [1 if subtree_size(level, node.child[k]) >= BBOX_TEST_MIN_SS else 0 for k in (0, 1)]
+    for side in (1, 0):   # d1 first (high bits), d0 last: the contract reads (flags >> (side*3)) & 7
+        far = 1 - side
+        b.store_uint(is_ss[side] | (is_ss[far] << 1) | (test[far] << 2), 3)
     b.store_int(node.x, 16).store_int(node.y, 16).store_int(node.dx, 16).store_int(node.dy, 16)
     for side in (0, 1):
         for v in node.bbox[side]:

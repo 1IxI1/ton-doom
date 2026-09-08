@@ -7,7 +7,7 @@
 (() => {
   const OP_FRAME = 0x4652414d;
   const DEFAULTS = {
-    addr: 'kQBoEafMGpXCigI5-5pPF6-ODQV4085sijGyosHxZs8SV_BT',
+    addr: 'kQDWQ2yYzm-O4orAS5WN6pxuuPFgtaAjIdwVUY1ocnmtb89t',
     key: '',
     base: 'testnet.toncenter.com',
   };

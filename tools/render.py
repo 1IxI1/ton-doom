@@ -274,6 +274,7 @@ class Renderer:
         H = self.H
         self.fb = [self.FULL << H] * self.W  # pixels 0, opening = all rows
         self.solid = 0
+        self.partial = False
         self.stats = {"nodes": 0, "bbox_tests": 0, "bbox_culled": 0, "subsectors": 0, "segs": 0,
                       "segs_backface": 0, "segs_offscreen": 0, "segs_occluded": 0, "segs_drawn": 0,
                       "runs": 0, "col_events": 0} if stats else None
@@ -416,37 +417,56 @@ class Renderer:
         worldlow = seg.bfloor - vz
         highstep = -worldhigh * step24
         lowstep = -worldlow * step24
-        # shade: depth (16.16) at the middle visible column; level 0 (near) .. 4 (far)
-        xm = (x1 + x2) >> 1
-        num = numBase - xm * dd2
-        depth16 = fdiv(2 * self.FOCAL * negC, num)
-        lvl = min(4, (fdiv(depth16, self.shade_depths[0] << FRAC)).bit_length())
+        # shade from the mean endpoint depth (16.16): level 0 (near) .. 4 (far), one step per 96 map units
+        lvl = min(4, fdiv(max(d1 + d2, 2), 2 * self.shade_depths[0] << FRAC).bit_length())
         lvl = max(0, min(4, lvl - seg.light_adj))
         wall_pats = self.wall_pats[lvl]
         floor_pats = self.floor_pat
-        fb = self.fb
+        solid_add, partial, runs = draw_runs(variant, H, self.FOCAL, self.CX, self.CY, self.fb, cols,
+                                             wall_pats, floor_pats, topstep, botstep, highstep, lowstep,
+                                             worldtop, worldbottom, worldhigh, worldlow, numBase, dd2, negC)
+        if st is not None:
+            st["runs"] += runs[0]
+            st["col_events"] += runs[1]
+        self.solid |= solid_add
+        if partial:
+            self.partial = True
 
-        while cols:
-            lo_bit = cols & -cols
-            lo = lo_bit.bit_length() - 1
-            t = cols >> lo
-            run = ((t + 1) & ~t).bit_length() - 1
-            cols &= ~(((1 << run) - 1) << lo)
-            if st is not None:
-                st["runs"] += 1
-                st["col_events"] += run
-            scale24 = fdiv((numBase - lo * dd2) << 39, negC)
-            top24 = CY24 - worldtop * scale24
-            bot24 = CY24 - worldbottom * scale24
-            high24 = CY24 - worldhigh * scale24
-            low24 = CY24 - worldlow * scale24
-            odd = lo & 1
-            wA, wB = (wall_pats[1], wall_pats[0]) if odd else (wall_pats[0], wall_pats[1])
-            fA, fB = (floor_pats[1], floor_pats[0]) if odd else (floor_pats[0], floor_pats[1])
-            fill_run(variant, H, fb, lo, run, top24, bot24, high24, low24, topstep, botstep, highstep, lowstep,
-                     wA, wB, fA, fB)
-            if variant == "solid":
-                self.solid |= ((1 << run) - 1) << lo
+
+def draw_runs(variant, H, FOCAL, CX, CY, fb, cols, wall_pats, floor_pats, ts, bs, hs, ls,
+              worldtop, worldbottom, worldhigh, worldlow, numBase, dd2, negC, gas_left=None):
+    """Reference semantics of drawSeg{Solid,Upper,Lower,Both} in render-asm.tolk: iterate the runs of set
+    bits in `cols`, fill their columns, return (solid_add, partial, (runs, columns)).
+    gas_left: optional callable returning remaining gas budget for the guard (None = unlimited)."""
+    CY24 = CY << 24
+    solid_add = 0
+    partial = False
+    nruns = 0
+    ncols = 0
+    while cols:
+        lo_bit = cols & -cols
+        lo = lo_bit.bit_length() - 1
+        t = cols >> lo
+        run = ((t + 1) & ~t).bit_length() - 1
+        cols &= ~(((1 << run) - 1) << lo)
+        if gas_left is not None and gas_left() < run * 2600:
+            partial = True
+            cols = 0
+            continue
+        nruns += 1
+        ncols += run
+        scale24 = fdiv((numBase - lo * dd2) << 39, negC)
+        top24 = CY24 - worldtop * scale24
+        bot24 = CY24 - worldbottom * scale24
+        high24 = CY24 - worldhigh * scale24
+        low24 = CY24 - worldlow * scale24
+        odd = lo & 1
+        wA, wB = (wall_pats[1], wall_pats[0]) if odd else (wall_pats[0], wall_pats[1])
+        fA, fB = (floor_pats[1], floor_pats[0]) if odd else (floor_pats[0], floor_pats[1])
+        fill_run(variant, H, fb, lo, run, top24, bot24, high24, low24, ts, bs, hs, ls, wA, wB, fA, fB)
+        if variant == "solid":
+            solid_add |= ((1 << run) - 1) << lo
+    return solid_add, partial, (nruns, ncols)
 
 
 def rows_top(H: int, n: int) -> int:

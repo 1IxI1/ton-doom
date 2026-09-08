@@ -116,7 +116,11 @@ fun checkFrames(txs: SendResultList, g: Golden, firstIndex: int, expectCount: in
             val op = body.preloadUint(32);
             if (op == 0x50524F46) {
                 val pr = body.loadAny<ProfEvent>();
-                if (printGas) { println("prof: {}", pr); }
+                if (printGas) {
+                    println("PROF total={} cols={} segs={} nodes={}", pr.gasTotal, pr.gasCols, pr.gasSegs - pr.gasCols, pr.gasBsp - pr.gasSegs);
+                    println("     ev={} segsDrawn={} segsTested={} nodes={}", pr.cols, pr.segsDrawn, pr.segs, pr.nodes);
+                    println("     culled(backface)={} setup(drawn, double counted prefix)={}", pr.gasCulled, pr.gasSetup);
+                }
             } else {
                 frames.push(raw);
             }

@@ -45,10 +45,10 @@ const SIN_BITS = 18;
 const MAX_INPUTS = 40;            // per external message (count:8 + 40 x 24 bits fit in one cell)
 const GAS_BUDGET = 950000;        // hard stop for rendering work (leaves ~50k to pack, emit, save, continue)
 const GAS_NODE_MARGIN = 25000;    // a node/subsector visit may add this much before the next check
-const GAS_PER_COLUMN = 2600;      // upper bound of one column event (fillBothRun + overhead)
+// (the per-run column guard, 2600 gas per column, is baked into the generated seg drawers)
 const CONT_VALUE = 100000000;     // 0.1 TON attached to each self-continuation (buys the 1M gas limit)
 const SEG_TAIL_BITS = 66;         // bits of a seg record after kind + 4 coords
-const SHADE_UNIT = 96 << 16;      // depth (16.16) of the first shade step
+const SHADE_UNIT2 = 2 * 96 << 16; // (d1 + d2) in 16.16 divided by this gives the shade level step (96 map units)
 
 // dither patterns: 4-row nibble replicated over the column; even / odd column phases
 const REP = FULL / 15;                     // 0b0001 0001 ... (H/4 nibbles)
@@ -60,6 +60,7 @@ const PAT_L4_0 = 0b1010 * REP;             // 75 %
 const PAT_L4_1 = 0b1111 * REP;
 const PAT_L5_0 = FULL;                     // 100 %
 const PAT_L5_1 = FULL;
+const FLOOR01 = PAT_L2_0 | (PAT_L2_1 << H); // floor pattern pair packed for the asm seg drawers
 
 // Doom checkcoord table packed: nibble per boxpos = x1sel y1sel x2sel y2sel (1 = right / bottom)
 const CHECKCOORD = 9 | (8 << 4) | (12 << 8) | (1 << 16) | (14 << 24) | (3 << 32) | (7 << 36) | (6 << 40);
@@ -145,6 +146,8 @@ global gProfSegsDrawn: int;
 global gProfCols: int;
 global gProfGasCols: int;
 global gProfGasSegs: int;
+global gProfGasCulled: int;
+global gProfGasSetup: int;
 
 struct (0x50524F46) ProfEvent {   // "PROF"
     gasInit: uint32
@@ -153,6 +156,8 @@ struct (0x50524F46) ProfEvent {   // "PROF"
     gasTotal: uint32
     gasCols: uint32
     gasSegs: uint32
+    gasCulled: uint32
+    gasSetup: uint32
     nodes: uint16
     segs: uint16
     segsDrawn: uint16
@@ -205,14 +210,14 @@ fun floorAt(root: cell, rootIsSS: bool, px: int, py: int): int {
     var isSS = rootIsSS;
     while (!isSS) {
         var s = c.beginParse();
-        val flags = s.loadUint(4);
+        val flags = s.loadUint(6);
         val nx = s.loadInt(16);
         val ny = s.loadInt(16);
         val ndx = s.loadInt(16);
         val ndy = s.loadInt(16);
         val side = pointOnSide(px, py, nx, ny, ndx, ndy);
         c = s.refAt(side);
-        isSS = ((flags >> (3 - side)) & 1) == 1;
+        isSS = ((flags >> (side * 3)) & 1) == 1;
     }
     return c.beginParse().preloadInt(16);
 }
@@ -276,25 +281,24 @@ fun renderNode(c: cell, isSS: bool, cam: Cam): void {
     }
     var s = c.beginParse();
     if (DEBUG) { gProfNodes += 1; }
-    val flags = s.loadUint(4);   // c0IsSS c1IsSS test0 test1
+    val flags = s.loadUint(6);   // d0:3 d1:3, see tools/level_encode.py
     val nx = s.loadInt(16);
     val ny = s.loadInt(16);
     val ndx = s.loadInt(16);
     val ndy = s.loadInt(16);
     val side = pointOnSide(cam.px, cam.py, nx, ny, ndx, ndy);
-    // flags bit for child k: isSS = bit (3-k), test = bit (1-k)
-    val nearIsSS = ((flags >> (3 - side)) & 1) == 1;
-    renderNode(s.refAt(side), nearIsSS, cam);
+    val d = (flags >> (side * 3)) & 7;   // bit0: near is subsector, bit1: far is subsector, bit2: test far bbox
+    renderNode(s.refAt(side), (d & 1) == 1, cam);
     if ((gSolid == FULLW) | gPartial) {
-        return;
+        return;   // screen full (or out of gas): nothing behind can be visible
     }
     val far = side ^ 1;
-    val farIsSS = ((flags >> (3 - far)) & 1) == 1;
-    if (((flags >> (1 - far)) & 1) == 0) {
+    val farIsSS = (d & 2) == 2;
+    if ((d & 4) == 0) {
         renderNode(s.refAt(far), farIsSS, cam);   // small subtree: not worth a bbox test
         return;
     }
-    // bbox of the far child: bbox0 at bit 68, bbox1 at bit 132
+    // bbox of the far child: bbox0 at bit 70, bbox1 at bit 134
     if (far == 1) {
         s.skipBits(64);
     }
@@ -326,9 +330,11 @@ fun renderSubsector(c: cell, cam: Cam): void {
     }
 }
 
-// Reads one seg record from `s` and draws it.
+// Reads one seg record from `s` and draws it. Transform / clipping / projection here (early exits for
+// culled segs); the run and column loops are in render-asm.tolk.
 @inline_ref
 fun drawSeg(mutate s: slice, cam: Cam): void {
+    val gasE = getGasConsumedAtTheMoment();
     if (DEBUG) { gProfSegs += 1; }
     val kind = s.loadUint(2);
     val x1w = s.loadInt(16);
@@ -340,6 +346,7 @@ fun drawSeg(mutate s: slice, cam: Cam): void {
     // back-face test in world space: cross(v2 - v1, p - v1) >= 0 means facing away / edge-on
     if ((x2w - x1w) * (-dy1) - (y2w - y1w) * (-dx1) >= 0) {
         s.skipBits(SEG_TAIL_BITS);
+        if (DEBUG) { gProfGasCulled += getGasConsumedAtTheMoment() - gasE; }
         return;
     }
     val dx2 = (x2w << 16) - cam.px;
@@ -377,12 +384,12 @@ fun drawSeg(mutate s: slice, cam: Cam): void {
         s.skipBits(SEG_TAIL_BITS);
         return;
     }
-    var cols = colMask(x1, x2) & ~gSolid;
+    val cols = colMask(x1, x2) & ~gSolid;
     if (cols == 0) {
         s.skipBits(SEG_TAIL_BITS);
         return;
     }
-    if (DEBUG) { gProfSegsDrawn += 1; }
+    if (DEBUG) { gProfSegsDrawn += 1; gProfGasSetup += getGasConsumedAtTheMoment() - gasE; }
     val worldbottom = s.loadInt(16) - cam.vz;
     val worldtop = s.loadInt(16) - cam.vz;
     val lightAdj = s.loadInt(2);
@@ -397,70 +404,33 @@ fun drawSeg(mutate s: slice, cam: Cam): void {
     val step24 = (dd << 40) / C;
     val topstep = -worldtop * step24;
     val botstep = -worldbottom * step24;
-    val highstep = -worldhigh * step24;
-    val lowstep = -worldlow * step24;
 
-    // shade from the depth at the middle visible column: level 0 (near) .. 4 (far)
-    val depth16 = (2 * FOCAL * negC) / (numBase - ((x1 + x2) >> 1) * dd2);
-    var lvl = min(4, ubitSize(depth16 / SHADE_UNIT));
+    // shade from the mean endpoint depth (map units): level 0 (near) .. 4 (far), then sector light
+    var lvl = min(4, ubitSize(max(d1 + d2, 2) / SHADE_UNIT2));
     lvl = min(4, max(0, lvl - lightAdj));
     val pats = gPats;
-    val wall0 = pats.get(lvl * 2);
-    val wall1 = pats.get(lvl * 2 + 1);
+    val w01 = pats.get(lvl * 2) | (pats.get(lvl * 2 + 1) << H);
 
-    var fb = gFb;
-    val rows = gRows;
     val gasB = getGasConsumedAtTheMoment();
-    while (cols != 0) {
-        val loBit = cols & (-cols);
-        val lo = ubitSize(loBit) - 1;
-        val t = cols >> lo;
-        val run = ubitSize((t + 1) & ~t) - 1;
-        cols &= ~(((1 << run) - 1) << lo);
-        if (getGasConsumedAtTheMoment() + run * GAS_PER_COLUMN > GAS_BUDGET) {
-            gPartial = true;
-            cols = 0;   // stop: no `break` in Tolk yet
-        } else {
-        if (DEBUG) { gProfCols += run; }
-        val scale24 = ((numBase - lo * dd2) << 39) / negC;
-        val top24 = (CY << 24) - worldtop * scale24;
-        val bot24 = (CY << 24) - worldbottom * scale24;
-        val xRun = lo | (run << 16);
-        if ((lo & 1) == 0) {
-            if (kind == 0) {
-                fb = fillSolidRun(rows, wall0, wall1, PAT_L2_0, PAT_L2_1, topstep, botstep, top24, bot24, fb, xRun);
-                gSolid |= ((1 << run) - 1) << lo;
-            } else if (kind == 1) {
-                val high24 = (CY << 24) - worldhigh * scale24;
-                fb = fillUpperRun(rows, wall0, wall1, PAT_L2_0, PAT_L2_1, topstep, botstep, highstep, top24, bot24, high24, fb, xRun);
-            } else if (kind == 2) {
-                val low24 = (CY << 24) - worldlow * scale24;
-                fb = fillLowerRun(rows, wall0, wall1, PAT_L2_0, PAT_L2_1, topstep, botstep, lowstep, top24, bot24, low24, fb, xRun);
-            } else {
-                val high24 = (CY << 24) - worldhigh * scale24;
-                val low24 = (CY << 24) - worldlow * scale24;
-                fb = fillBothRun(rows, wall0, wall1, PAT_L2_0, PAT_L2_1, topstep, botstep, highstep, lowstep, top24, bot24, high24, low24, fb, xRun);
-            }
-        } else {
-            if (kind == 0) {
-                fb = fillSolidRun(rows, wall1, wall0, PAT_L2_1, PAT_L2_0, topstep, botstep, top24, bot24, fb, xRun);
-                gSolid |= ((1 << run) - 1) << lo;
-            } else if (kind == 1) {
-                val high24 = (CY << 24) - worldhigh * scale24;
-                fb = fillUpperRun(rows, wall1, wall0, PAT_L2_1, PAT_L2_0, topstep, botstep, highstep, top24, bot24, high24, fb, xRun);
-            } else if (kind == 2) {
-                val low24 = (CY << 24) - worldlow * scale24;
-                fb = fillLowerRun(rows, wall1, wall0, PAT_L2_1, PAT_L2_0, topstep, botstep, lowstep, top24, bot24, low24, fb, xRun);
-            } else {
-                val high24 = (CY << 24) - worldhigh * scale24;
-                val low24 = (CY << 24) - worldlow * scale24;
-                fb = fillBothRun(rows, wall1, wall0, PAT_L2_1, PAT_L2_0, topstep, botstep, highstep, lowstep, top24, bot24, high24, low24, fb, xRun);
-            }
-        }
-        }
+    if (DEBUG) { gProfGasSetup += gasB - gasE; }
+    var fb2: array<int> = [];
+    var solidAdd = 0;
+    var partial = 0;
+    if (kind == 0) {
+        (fb2, solidAdd, partial) = drawSegSolid(gRows, w01, FLOOR01, topstep, botstep, worldtop, worldbottom, numBase, dd2, negC, gFb, cols);
+    } else if (kind == 1) {
+        (fb2, solidAdd, partial) = drawSegUpper(gRows, w01, FLOOR01, topstep, botstep, -worldhigh * step24, worldtop, worldbottom, worldhigh, numBase, dd2, negC, gFb, cols);
+    } else if (kind == 2) {
+        (fb2, solidAdd, partial) = drawSegLower(gRows, w01, FLOOR01, topstep, botstep, -worldlow * step24, worldtop, worldbottom, worldlow, numBase, dd2, negC, gFb, cols);
+    } else {
+        (fb2, solidAdd, partial) = drawSegBoth(gRows, w01, FLOOR01, topstep, botstep, -worldhigh * step24, -worldlow * step24, worldtop, worldbottom, worldhigh, worldlow, numBase, dd2, negC, gFb, cols);
+    }
+    gFb = fb2;
+    gSolid |= solidAdd;
+    if (partial != 0) {
+        gPartial = true;
     }
     if (DEBUG) { gProfGasCols += getGasConsumedAtTheMoment() - gasB; }
-    gFb = fb;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -483,7 +453,7 @@ fun renderFrame(root: cell, rootIsSS: bool, cam: Cam): cell {
     }
     gRows = rows;
     gPats = [PAT_L5_0, PAT_L5_1, PAT_L4_0, PAT_L4_1, PAT_L3_0, PAT_L3_1, PAT_L2_0, PAT_L2_1, PAT_L2_0, PAT_L2_1];
-    if (DEBUG) { gProfNodes = 0; gProfSegs = 0; gProfSegsDrawn = 0; gProfCols = 0; gProfGasCols = 0; gProfGasSegs = 0; }
+    if (DEBUG) { gProfNodes = 0; gProfSegs = 0; gProfSegsDrawn = 0; gProfCols = 0; gProfGasCols = 0; gProfGasSegs = 0; gProfGasCulled = 0; gProfGasSetup = 0; }
     val gas1 = getGasConsumedAtTheMoment();
     renderNode(root, rootIsSS, cam);
     val gas2 = getGasConsumedAtTheMoment();
@@ -511,7 +481,7 @@ fun renderFrame(root: cell, rootIsSS: bool, cam: Cam): cell {
             dest: createAddressNone(),
             body: ProfEvent {
                 gasInit: gas1 - gas0, gasBsp: gas2 - gas1, gasPack: gas3 - gas2, gasTotal: gas3,
-                gasCols: gProfGasCols, gasSegs: gProfGasSegs,
+                gasCols: gProfGasCols, gasSegs: gProfGasSegs, gasCulled: gProfGasCulled, gasSetup: gProfGasSetup,
                 nodes: gProfNodes, segs: gProfSegs, segsDrawn: gProfSegsDrawn, cols: gProfCols,
             },
         });
