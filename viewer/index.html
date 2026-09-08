@@ -12,7 +12,7 @@
   header input.addr { width: 46ch; }
   header button { background: #333; color: #eee; border: 1px solid #555; padding: 4px 10px; font: inherit; cursor: pointer; }
   header button.on { background: #2a5; color: #000; }
-  #about { margin: 0; padding: 8px 12px 0; color: #999; max-width: 90ch; }
+  #about, #about-play { margin: 0; padding: 8px 12px 0; color: #999; max-width: 90ch; }
   #frames { padding: 4px 12px 24px; color: #999; max-width: 90ch; }
   #frames h3 { color: #ccc; font-size: 13px; margin: 14px 0 4px; }
   #frames p { margin: 6px 0; }
@@ -22,6 +22,8 @@
   canvas { image-rendering: pixelated; image-rendering: crisp-edges; background: #000; border: 1px solid #333; }
   #stats { min-width: 34ch; white-space: pre; }
   #log { max-height: 40vh; overflow: auto; white-space: pre; color: #9a9; font-size: 12px; }
+  #playstats { color: #fc6; white-space: pre-wrap; margin: 6px 0; }
+  #hint { color: #fc6; }
   .warn { color: #fa5; }
   .err { color: #f66; }
   a { color: #8cf; }
@@ -35,15 +37,22 @@
   <button id="connect">connect</button>
   <button id="poll">poll mode</button>
   <button id="pause">pause</button>
+  <button id="play">play</button>
   <span id="status" class="warn">idle</span>
+  <span id="hint" hidden>arrows / WASD walk and turn, A D strafe, space fires (inputs go to the chain in batches; ~1.5 s to the screen)</span>
 </header>
 <main>
   <canvas id="screen" width="640" height="480"></canvas>
   <div>
     <div id="stats"></div>
+    <div id="playstats"></div>
     <div id="log"></div>
   </div>
 </main>
+<p id="about-play" hidden><b>You are playing.</b> Every key sample (20 per second) becomes a 4-byte input
+<code>turn fwd strafe fire</code>; the page packs up to 29 of them into one external message every 0.5 s and
+sends it to the contract through toncenter. The contract moves the player (blockmap collisions, sliding along
+walls), renders the frame and emits it; what you see is read back from testnet.</p>
 <p id="about">Nobody is playing: the player is an <b>on-chain AI</b>. The contract itself decides every step
 (probes the level's blockmap, turns away from walls, shoots now and then) and renders every frame inside the TVM;
 the viewer only reads the frames back from testnet.

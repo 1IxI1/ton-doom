@@ -142,7 +142,8 @@
     if (paused) return;
     const nominal = Math.max(1, Number($('fps').value) || 25);
     let fps = nominal;
-    if (queue.length > 40) fps = nominal * 3;
+    if (playing) fps = queue.length > 4 ? nominal * 3 : queue.length > 1 ? nominal * 1.5 : nominal;   // latency first
+    else if (queue.length > 40) fps = nominal * 3;
     else if (queue.length > 20) fps = nominal * 1.6;
     else if (queue.length > 12) fps = nominal * 1.2;
     else if (queue.length < 3) fps = nominal * 0.7;
@@ -229,6 +230,104 @@
     if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
     $('connect').classList.remove('on'); $('poll').classList.remove('on');
   }
+
+  // ---- play: keyboard -> inputs (20/s) -> batches (one external per 0.5 s) -> the contract ---------
+  // Externals need no signature: batchId must be lastBatch+1 (or +2, one batch may overtake). We keep at
+  // most two batches in flight, confirm them through the `lastBatch` get method and resend after 3 s.
+  const OP_TICK = 0x444f4f4d;
+  const PLAY = { rate: 20, turn: 6, batchMs: 500, maxBatch: 29, inFlight: 2, resendMs: 3000, fireEvery: 8, tail: 3 };
+  const KEYMAP = { ArrowUp: 'fwd', KeyW: 'fwd', ArrowDown: 'back', KeyS: 'back', ArrowLeft: 'left', ArrowRight: 'right',
+                   KeyA: 'sleft', KeyD: 'sright', Space: 'fire', ControlLeft: 'fire', ControlRight: 'fire', KeyF: 'fire' };
+  const keys = new Set();
+  let playing = false, timers = [], pending = [], sent = [], nextBatch = 0, lastAck = 0, fireEdge = false, fireHold = 0, tail = 0;
+  const pstat = { sentInputs: 0, batches: 0, resent: 0 };
+
+  function onKey(e, down) {
+    const k = KEYMAP[e.code];
+    if (!k || !playing || e.metaKey || e.altKey) return;
+    e.preventDefault();
+    if (down && k === 'fire' && !keys.has('fire')) fireEdge = true;
+    if (down) keys.add(k); else keys.delete(k);
+  }
+  function sample() {
+    const turn = (keys.has('left') ? PLAY.turn : 0) - (keys.has('right') ? PLAY.turn : 0);   // angle grows counter-clockwise
+    const fwd = (keys.has('fwd') ? 1 : 0) - (keys.has('back') ? 1 : 0);
+    const side = (keys.has('sright') ? 1 : 0) - (keys.has('sleft') ? 1 : 0);
+    let fire = 0;
+    if (fireEdge) { fire = 1; fireEdge = false; fireHold = PLAY.fireEvery; }
+    else if (keys.has('fire') && --fireHold <= 0) { fire = 1; fireHold = PLAY.fireEvery; }
+    if (turn || fwd || side || fire) tail = PLAY.tail;
+    else if (tail > 0) tail--;          // a few idle frames after the last key: lets the flash/bob settle
+    else return;
+    pending.push([turn, fwd, side, fire]);
+  }
+  async function api(path, body) {
+    const r = await fetch(`https://${DEFAULTS.base}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey() }, body: JSON.stringify(body) });
+    const text = await r.text();
+    if (!r.ok) { const m = /exitcode=(\d+)/.exec(text); throw new Error('HTTP ' + r.status + (m ? ' exit ' + m[1] : '')); }
+    return JSON.parse(text);
+  }
+  async function getLastBatch(addr) {
+    const r = await api('/api/v3/runGetMethod', { address: addr, method: 'lastBatch', stack: [] });
+    return parseInt(r.stack[0].value, 16);
+  }
+  function tickMessage(addr, id, inputs) {
+    const body = Boc.beginCell().storeUint(OP_TICK, 32).storeUint(id, 32).storeUint(inputs.length, 8);
+    for (const [t, f, sd, fire] of inputs) body.storeInt(t, 8).storeInt(f, 8).storeInt(sd, 8).storeUint(fire, 8);
+    // ext_in_msg_info$10 src:addr_none dest import_fee:0 init:no body:^Cell
+    return Boc.beginCell().storeUint(2, 2).storeUint(0, 2).storeAddress(addr).storeCoins(0).storeBit(0).storeBit(1).storeRef(body.endCell()).endCell();
+  }
+  async function flush(addr) {
+    if (!pending.length || sent.length >= PLAY.inFlight) return;
+    const inputs = pending.splice(0, PLAY.maxBatch);
+    const id = nextBatch++;
+    const rec = { id, inputs, boc: Boc.toBase64(Boc.serialize(tickMessage(addr, id, inputs))), at: performance.now() };
+    sent.push(rec);
+    try { await api('/api/v3/message', { boc: rec.boc }); pstat.batches++; pstat.sentInputs += inputs.length; }
+    catch (e) {
+      log(`batch ${id} rejected: ${e.message}`, 'err');
+      sent = sent.filter(r => r !== rec); pending.unshift(...inputs);
+      try { lastAck = await getLastBatch(addr); sent = sent.filter(r => r.id > lastAck); nextBatch = lastAck + 1 + sent.length; } catch (e2) {}
+    }
+    showPlayStats();
+  }
+  async function ack(addr) {
+    try { lastAck = await getLastBatch(addr); } catch (e) { return; }
+    sent = sent.filter(r => r.id > lastAck);
+    const now = performance.now();
+    for (const r of sent) {
+      if (now - r.at > PLAY.resendMs) {
+        r.at = now; pstat.resent++;
+        log(`batch ${r.id} not applied in ${PLAY.resendMs / 1000}s, resending`, 'warn');
+        api('/api/v3/message', { boc: r.boc }).catch(e => log(`resend ${r.id} failed: ${e.message}`, 'err'));
+      }
+    }
+    showPlayStats();
+  }
+  function showPlayStats() {
+    $('playstats').textContent = playing
+      ? `keys ${[...keys].join(' ') || '-'}   pending ${pending.length}   in flight ${sent.length} (last acked batch ${lastAck})   sent ${pstat.sentInputs} inputs in ${pstat.batches} batches, resent ${pstat.resent}`
+      : '';
+  }
+  async function startPlay() {
+    const addr = $('addr').value.trim();
+    if (!apiKey()) { log('play needs the toncenter API key: run python3 tools/viewer_config.py and open the viewer locally', 'err'); return; }
+    try { lastAck = await getLastBatch(addr); } catch (e) { log('cannot read lastBatch: ' + e.message, 'err'); return; }
+    nextBatch = lastAck + 1; sent = []; pending = []; keys.clear(); tail = 0;
+    playing = true; $('play').classList.add('on'); $('hint').hidden = false; $('about').hidden = true; $('about-play').hidden = false;
+    timers = [setInterval(sample, 1000 / PLAY.rate), setInterval(() => flush(addr), PLAY.batchMs), setInterval(() => ack(addr), 1000)];
+    log(`play: batches start at ${nextBatch}; arrows/WASD move, space fires`);
+    showPlayStats();
+  }
+  function stopPlay() {
+    playing = false; timers.forEach(clearInterval); timers = []; keys.clear();
+    $('play').classList.remove('on'); $('hint').hidden = true; $('about').hidden = false; $('about-play').hidden = true; showPlayStats();
+  }
+  window.addEventListener('keydown', (e) => onKey(e, true));
+  window.addEventListener('keyup', (e) => onKey(e, false));
+  window.addEventListener('blur', () => keys.clear());
+  $('play').onclick = () => (playing ? stopPlay() : startPlay());
+  if (hosted) $('play').hidden = true;
 
   $('connect').onclick = () => (ws ? disconnect() : connectWs());
   $('poll').onclick = () => (pollTimer ? disconnect() : startPoll());

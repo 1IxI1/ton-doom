@@ -19,17 +19,20 @@ from boc import begin_cell  # noqa: E402
 from render import ANGLES, FRAC, VIEWHEIGHT, Level, Player, Renderer, cos_a, frame_cell_chain, load_level, sin_a  # noqa: E402
 
 PATHS = {
-    # (turn, forward, strafe) per frame
-    "walk": [(0, 1, 0)] * 6 + [(-4, 1, 0)] * 8 + [(0, 1, 0)] * 6 + [(6, 0, 0)] * 10 + [(0, 1, 1)] * 6 + [(-3, 1, 0)] * 4,
-    "spin": [(8, 0, 0)] * 16,
-    "still": [(0, 0, 0)] * 3,
+    # (turn, forward, strafe, fire) per frame
+    "walk": [(0, 1, 0, 0)] * 6 + [(-4, 1, 0, 0)] * 4 + [(-4, 1, 0, 1)] + [(-4, 1, 0, 0)] * 3 + [(0, 1, 0, 0)] * 6
+            + [(6, 0, 0, 0)] * 4 + [(6, 0, 0, 1)] + [(6, 0, 0, 0)] * 5 + [(0, 1, 1, 0)] * 6 + [(-3, 1, 0, 0)] * 4,
+    "spin": [(8, 0, 0, 0)] * 16,
+    "still": [(0, 0, 0, 1), (0, 0, 0, 0), (0, 0, 0, 0)],
+    # into the wall west of the start (facing 180 deg): the last steps slide / stop instead of passing through
+    "wall": [(-128, 0, 0, 0)] + [(0, 1, 0, 0)] * 26 + [(-24, 1, 0, 0)] * 4 + [(0, 1, 0, 1)] * 2,
 }
 
 
 def gen(level: Level, inputs, W: int, H: int, png_dir=None, aspect_y: int = 1, ai_frames: int = 0, wad=None):
-    """inputs: list of (turn, fwd, side); ai_frames > 0: instead drive the on-chain wanderer AI (tools/ai.py).
-    Frames get the weapon overlay (bob while walking, muzzle flash on random shots), like the contract."""
-    from ai import AiState, ai_step, frame_begin, gun_bob
+    """inputs: list of (turn, fwd, side, fire); ai_frames > 0: instead drive the on-chain wanderer AI (tools/ai.py).
+    Frames get the weapon overlay (bob while walking, muzzle flash on shots), like the contract."""
+    from ai import AiState, ai_step, frame_begin, gun_bob, player_move
     from sprites import gun_sprites, overlay
     sx, sy, sa = level.player_start
     st = AiState(sx << FRAC, sy << FRAC, sa * ANGLES // 360)
@@ -40,17 +43,14 @@ def gen(level: Level, inputs, W: int, H: int, png_dir=None, aspect_y: int = 1, a
     if ai_frames:
         inputs = []
     for i in range(n):
-        frame_begin(st)
         if ai_frames:
+            frame_begin(st, ai=True)
             turn, fwd = ai_step(level, st)
-            inputs.append((turn, fwd, 0))
+            inputs.append((turn, fwd, 0, 0))
         else:
-            turn, fwd, side = inputs[i]
-            st.angle = (st.angle + turn) % ANGLES
-            c, s_ = cos_a(st.angle), sin_a(st.angle)
-            st.x += fwd * 8 * c + side * 6 * s_
-            st.y += fwd * 8 * s_ - side * 6 * c
-            st.moving = fwd != 0
+            turn, fwd, side, fire = inputs[i]
+            frame_begin(st, ai=False, fire=bool(fire))
+            player_move(level, st, turn, fwd, side)
         viewz = (level.point_in_subsector(st.x, st.y).floor + VIEWHEIGHT) << FRAC
         cols = r.render(st.x, st.y, st.angle, viewz, stats=True)
         overlay(cols, flash if st.gun > 0 else idle, H, gun_bob(st))
@@ -65,11 +65,11 @@ def gen(level: Level, inputs, W: int, H: int, png_dir=None, aspect_y: int = 1, a
 
 def build_boc(inputs, frames, W, H):
     nxt = None
-    chunks = [inputs[i : i + 40] for i in range(0, len(inputs), 40)] or [[]]
+    chunks = [inputs[i : i + 31] for i in range(0, len(inputs), 31)] or [[]]
     for chunk in reversed(chunks):
         b = begin_cell()
-        for turn, fwd, side in chunk:
-            b.store_int(turn, 8).store_int(fwd, 8).store_int(side, 8)
+        for turn, fwd, side, fire in chunk:
+            b.store_int(turn, 8).store_int(fwd, 8).store_int(side, 8).store_uint(fire, 8)
         if nxt is not None:
             b.store_ref(nxt)
         nxt = b.end_cell()
@@ -97,16 +97,14 @@ def main(argv=None):
     ap.add_argument("--ai", type=int, default=0, help="drive the wanderer AI for this many frames instead of a path")
     args = ap.parse_args(argv)
     level = load_level(args.level)
+    # the blockmap (AI probes, player collisions) must see the opened doors: build it from mutated data
+    import json as _json
+    from blockmap import Blockmap
+    from render import open_doors
+    data = _json.load(open(args.level)); open_doors(data); level.blockmap = Blockmap(data)
     if args.ai:
-        import json as _json
-        from blockmap import Blockmap
-        with open(args.level) as f:
-            level.blockmap = Blockmap(_json.load(f)) if False else None
-        # the blockmap must see the opened doors: rebuild from the same (mutated) data the level was built from
-        from render import open_doors
-        data = _json.load(open(args.level)); open_doors(data); level.blockmap = Blockmap(data)
         frames = gen(level, [], args.W, args.H, args.png_dir, args.aspect, ai_frames=args.ai)
-        inputs = [(0, 0, 0)] * 0
+        inputs = []
     else:
         inputs = PATHS[args.path]
         frames = gen(level, inputs, args.W, args.H, args.png_dir, args.aspect)

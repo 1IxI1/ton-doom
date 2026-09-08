@@ -55,13 +55,37 @@ class AiState:
         self.moving = False
 
 
-def frame_begin(st: AiState):
-    """Per-frame bookkeeping shared by the AI and the queued-input paths (mirrors Doom.tolk step)."""
+def frame_begin(st: AiState, ai: bool = True, fire: bool = False):
+    """Per-frame bookkeeping shared by the AI and the queued-input paths (mirrors Doom.tolk step).
+    The AI shoots now and then (LCG); a player input shoots when its fire flag is set."""
     st.rnd = lcg(st.rnd)
     st.frame_no += 1
     st.gun = max(st.gun - 1, 0)
-    if ((st.rnd >> 20) & 63) == 0:
+    if fire if not ai else ((st.rnd >> 20) & 63) == 0:
         st.gun = GUN_FLASH_FRAMES
+
+
+def player_move(level: Level, st: AiState, turn: int, fwd: int, side: int, speed_fwd: int = SPEED_FWD, speed_side: int = 6):
+    """Player input: turn, then move with blockmap collision, sliding along walls (mirrors Doom.tolk step)."""
+    st.angle = (st.angle + turn) % ANGLES
+    c, s_ = cos_a(st.angle), sin_a(st.angle)
+    nx = st.x + fwd * speed_fwd * c + side * speed_side * s_
+    ny = st.y + fwd * speed_fwd * s_ - side * speed_side * c
+    if (nx, ny) != (st.x, st.y):
+        hit = level.blockmap.hit_line(st.x, st.y, nx, ny)
+        if hit is not None:
+            # slide along the wall that was hit: project the move onto the line (floor division = TVM DIV)
+            dx, dy = hit.x2 - hit.x1, hit.y2 - hit.y1
+            dot = (nx - st.x) * dx + (ny - st.y) * dy
+            len2 = dx * dx + dy * dy
+            sx = st.x + dot * dx // len2
+            sy = st.y + dot * dy // len2
+            if (sx, sy) != (st.x, st.y) and not blocked(level, st.x, st.y, sx, sy):
+                nx, ny = sx, sy
+            else:
+                nx, ny = st.x, st.y
+    st.moving = (nx, ny) != (st.x, st.y)
+    st.x, st.y = nx, ny
 
 
 def gun_bob(st: AiState) -> int:
@@ -106,7 +130,7 @@ def ai_step(level: Level, st: AiState):
     if fwd:
         st.x += SPEED_FWD * cos_a(st.angle)
         st.y += SPEED_FWD * sin_a(st.angle)
-    st.moving = fwd != 0
+    st.moving = fwd != 0   # the AI only walks where it probed
     return turn, fwd
 
 

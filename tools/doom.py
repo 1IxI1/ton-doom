@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Doom-on-TON client tools: build/send tick messages, decode frames, run the demo feeder.
 
-  python3 tools/doom.py send <addr> --batch 1 --inputs "0,1,0;0,1,0"    send one tick with explicit inputs
+  python3 tools/doom.py send <addr> --batch 1 --inputs "0,1,0;0,1,0,1"  send one tick with explicit inputs (turn,fwd,side[,fire])
   python3 tools/doom.py demo <addr> [--rate 20] [--batch 8]              feed the scripted E1M1 walk forever
   python3 tools/doom.py frames <addr> [--limit 20] [--png-dir DIR]       fetch recent frames, dump PNGs
   python3 tools/doom.py state <addr>                                     print get-method state
@@ -27,6 +27,7 @@ from boc import Address, Cell, begin_cell, deserialize_boc, external_message  # 
 
 OP_TICK = 0x444F4F4D
 OP_FRAME = 0x4652414D
+MAX_INPUTS = 29        # inputs per external (op:32 batchId:32 count:8 + 29 x 32 bits fit in one cell)
 OP_RESET = 0x52534554
 OP_START = 0x53545254
 OP_STOP = 0x53544F50
@@ -39,10 +40,12 @@ ANGLES = 512
 # --------------------------------------------------------------------------- #
 def tick_body(batch_id: int, inputs) -> Cell:
     inputs = list(inputs)
-    assert 1 <= len(inputs) <= 39
+    assert 1 <= len(inputs) <= MAX_INPUTS
     b = begin_cell().store_uint(OP_TICK, 32).store_uint(batch_id, 32).store_uint(len(inputs), 8)
-    for turn, fwd, side in inputs:
-        b.store_int(turn, 8).store_int(fwd, 8).store_int(side, 8)
+    for rec in inputs:
+        turn, fwd, side = rec[:3]
+        fire = rec[3] if len(rec) > 3 else 0
+        b.store_int(turn, 8).store_int(fwd, 8).store_int(side, 8).store_uint(1 if fire else 0, 8)
     return b.end_cell()
 
 
@@ -158,8 +161,8 @@ def cmd_send(args):
     addr = Address.parse(args.addr)
     inputs = []
     for rec in args.inputs.split(";"):
-        t, f, s = (int(v) for v in rec.split(","))
-        inputs.append((t, f, s))
+        vals = [int(v) for v in rec.split(",")]
+        inputs.append(tuple(vals + [0] * (4 - len(vals)))[:4])   # turn,fwd,side[,fire]
     h = send_tick(addr, args.batch, inputs)
     print("sent batch", args.batch, "inputs", len(inputs), "hash", h)
     return 0
@@ -296,7 +299,7 @@ def main(argv=None):
     p = sub.add_parser("send"); p.add_argument("addr", nargs="?", default=default_addr); p.add_argument("--batch", type=int, required=True)
     p.add_argument("--inputs", required=True); p.set_defaults(fn=cmd_send)
     p = sub.add_parser("demo"); p.add_argument("addr", nargs="?", default=default_addr); p.add_argument("--rate", type=float, default=20.0, help="inputs per second")
-    p.add_argument("--batch", type=int, default=36, help="inputs per external (<= 39; keep externals <= ~2/s)"); p.add_argument("--max-queue", type=int, default=80)
+    p.add_argument("--batch", type=int, default=29, help="inputs per external (<= 29; keep externals <= ~2/s)"); p.add_argument("--max-queue", type=int, default=80)
     p.add_argument("--skip", type=int, default=0, help="skip this many inputs of the route (resume position)")
     p.add_argument("--no-reset", action="store_true", help="do not teleport the player to the start first")
     p.add_argument("--route", choices=["ai", "loop"], default="ai", help="ai: off-chain wanderer simulation (default); loop: fixed waypoints")

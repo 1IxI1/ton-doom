@@ -32,10 +32,11 @@ Every transaction there is one rendered frame.
   257-bit integer per screen column, ordered dithering by distance and sector light.
   `contracts/render-asm.tolk` — the hot column loops as hand-written TVM assembly, generated and verified
   by `tools/asmgen.py` + `tools/stacksim.py`.
-* External `DOOM` message: `op:32 batchId:32 count:8 (turn:int8 fwd:int8 side:int8) x count`.
-  Batches must arrive strictly in order (`batchId == lastBatch + 1`); anything else is rejected before
-  `ACCEPT` (free). Inputs are queued in the contract state; every transaction pops one input, moves the
-  player (noclip), renders and emits the frame, then sends itself a `CONT` message if the queue is not
+* External `DOOM` message: `op:32 batchId:32 count:8 (turn:int8 fwd:int8 side:int8 flags:uint8) x count`
+  (flags bit 0 = fire). Batches must arrive in order (`batchId == lastBatch + 1`, or `+ 2` for one batch
+  that overtook its predecessor); anything else is rejected before `ACCEPT` (free). Inputs are queued in the
+  contract state; every transaction pops one input, moves the player (blockmap collisions, sliding along
+  walls like Doom), renders and emits the frame, then sends itself a `CONT` message if the queue is not
   empty. Frames therefore continue across blocks at up to the block gas limit (~10 frames per 0.4 s block).
 * A gas guard keeps every transaction under 1M gas: when the budget is hit, the frame is emitted partial
   (`flags & 1`) instead of failing.
@@ -51,6 +52,10 @@ Every transaction there is one rendered frame.
   frame hashes). `tools/golden.py` builds golden frames, `tools/level_encode.py` packs E1M1 into cells,
   `tools/wad.py` parses the WAD, `tools/boc.py` is a dependency-free BOC/cell library.
 * `viewer/index.html` — the viewer (WebSocket streaming, `min_finality: confirmed`, adaptive playback).
+  With a local `config.js` (API key) it also has a **play** mode: arrows / WASD walk and turn, space
+  fires; key samples (20/s) are packed into one external message per 0.5 s (`viewer/boc.js` builds the
+  BOC in the browser), confirmed through the `lastBatch` get method and resent if a batch gets lost.
+  About 1.5 s from key press to the frame on screen (batching + block + streaming).
 * `tools/doom.py` — CLI: send inputs, run the autopilot demo feeder, dump frames as PNG.
 
 ## Running
@@ -60,7 +65,7 @@ acton build && acton test                  # emulator: golden-frame tests, gas n
 acton script scripts/deploy.tolk --net testnet     # deploy (wallet main-w9), prints DOOM_ADDRESS
 acton script scripts/topup.tolk --net testnet <addr> 50000      # top up; scripts/withdraw.tolk takes it back
 python3 tools/doom.py start                        # let the on-chain AI run (stop: doom.py stop)
-python3 tools/doom.py demo --rate 25 --batch 30   # feed the scripted E1M1 walk (address from .env)
+python3 tools/doom.py demo --rate 25 --batch 29   # feed the scripted E1M1 walk (address from .env)
 python3 tools/viewer_config.py && open viewer/index.html   # viewer config (address, key) from .env
 ```
 

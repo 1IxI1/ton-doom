@@ -84,6 +84,10 @@ class Blockmap:
     # ---- collision (mirrors the contract) ------------------------------------------------------ #
     def blocked(self, px: int, py: int, nx: int, ny: int) -> bool:
         """Move (px,py) -> (nx,ny), 16.16 coordinates. True if it crosses a blocking line."""
+        return self.hit_line(px, py, nx, ny) is not None
+
+    def hit_line(self, px: int, py: int, nx: int, ny: int):
+        """The first blocking line (in blockmap order, like the contract) crossed by the move, or None."""
         x0, y0 = px >> FRAC, py >> FRAC
         x1, y1 = nx >> FRAC, ny >> FRAC
         bxa, bya = self.block_of(min(x0, x1), min(y0, y1))
@@ -99,8 +103,8 @@ class Blockmap:
                         continue
                     seen.add(li)
                     if line_blocks_move(self.lines[li], px, py, nx, ny, mx, my):
-                        return True
-        return False
+                        return self.lines[li]
+        return None
 
 
 def line_blocks_move(ln: BlockLine, px, py, nx, ny, mx, my) -> bool:

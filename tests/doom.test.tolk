@@ -75,12 +75,12 @@ fun tickBody(g: Golden, skip: int, count: int, batchId: int): cell {
     var idx = 0;
     var taken = 0;
     while (taken < count) {
-        if (s.remainingBitsCount() < 24) {
+        if (s.remainingBitsCount() < 32) {
             s = s.loadRef().beginParse();
         }
-        val rec = s.loadUint(24);
+        val rec = s.loadUint(32);   // turn:int8 fwd:int8 side:int8 flags:uint8
         if (idx >= skip) {
-            b.storeUint(rec, 24);
+            b.storeUint(rec, 32);
             taken += 1;
         }
         idx += 1;
@@ -182,6 +182,28 @@ get fun `test walk path matches reference renderer`() {
         batchId += 1;
     }
     expect(net.runGetMethod<int>(addr, "queued")).toEqual(0);
+}
+
+get fun `test player collides with walls and slides along them`() {
+    val level = loadLevel();
+    val g = loadGolden("assets/golden/wall.boc");   // walks into a diagonal wall, turns, fires twice
+    val (addr, _) = deployDoom(level);
+    var sent = 0;
+    var batchId = 1;
+    while (sent < g.count) {
+        val n = min(10, g.count - sent);
+        val res = net.sendExternal(net.createExternalMessage(addr, tickBody(g, sent, n, batchId)));
+        expect(res).toBeAccepted();
+        val txs = res.unwrap();
+        expect(txs).toHaveAllSuccessfulTxs();
+        checkFrames(txs, g, sent, n, true);
+        sent += n;
+        batchId += 1;
+    }
+    val (px, py, _) = net.runGetMethod<(int, int, int)>(addr, "player");
+    val last = goldenFrameAt(g, g.count - 1);
+    expect(px).toEqual(last.px);
+    expect(py).toEqual(last.py);
 }
 
 get fun `test bad opcode is rejected before accept`() {
@@ -288,7 +310,7 @@ get fun `test a frame that runs out of gas bounces and the chain goes on`() {
     // gas limit below the render guard: busy frames fail with out-of-gas instead of being emitted partial
     // (the walk path peaks above 900k; the first frame, rendered by the external itself, stays below)
     raiseGasLimit(860000);
-    val n = min(g.count, 39);   // MAX_INPUTS per external
+    val n = min(g.count, 29);   // MAX_INPUTS per external
     val res = net.sendExternal(net.createExternalMessage(addr, tickBody(g, 0, n, 1)));
     expect(res).toBeAccepted();
     val txs = res.unwrap();

@@ -43,7 +43,8 @@ const SPEED_FWD = 8;              // map units per frame per input unit
 const SPEED_SIDE = 6;
 const SIN_PER_LEAF = 56;
 const SIN_BITS = 18;
-const MAX_INPUTS = 39;            // per external message (op:32 batchId:32 count:8 + 39 x 24 bits fit in one cell)
+const INPUT_BITS = 32;            // turn:int8 fwd:int8 side:int8 flags:uint8 (bit 0: fire)
+const MAX_INPUTS = 29;            // per external message (op:32 batchId:32 count:8 + 29 x 32 bits fit in one cell)
 const GAS_BUDGET = 930000;        // hard stop for rendering work (leaves ~70k: weapon overlay ~18k, pack, emit, save, continue)
 const GAS_NODE_MARGIN = 25000;    // a node/subsector visit may add this much before the next check
 // (the per-run column guard, 2600 gas per column and the same budget, is baked into the generated seg drawers:
@@ -105,7 +106,7 @@ struct Storage {
     angle: uint16      // 0..ANGLES-1
     lastBatch: uint32  // id of the last batch appended to the queue
     qpos: uint8        // inputs already consumed from the head queue cell
-    queue: cell?       // FIFO of inputs: cells [count:8, count x (turn:int8 fwd:int8 side:int8)], ref0 = next
+    queue: cell?       // FIFO of inputs: cells [count:8, count x (turn:int8 fwd:int8 side:int8 flags:uint8)], ref0 = next
     held: cell?        // batch lastBatch+2 that arrived before lastBatch+1 (reorder buffer of one batch)
     owner: address     // may withdraw the balance (internal message with op WDRW)
     auto: bool         // the wanderer AI drives the player when the queue is empty
@@ -124,7 +125,7 @@ fun Storage.save(self) {
     contract.setData(self.toCell());
 }
 
-// external-in body: op:32 batchId:32 count:8 then count x (turn:int8 forward:int8 strafe:int8)
+// external-in body: op:32 batchId:32 count:8 then count x (turn:int8 forward:int8 strafe:int8 flags:uint8, bit 0 = fire)
 struct (0x444F4F4D) Tick {
     batchId: uint32
     count: uint8
@@ -472,7 +473,9 @@ fun drawSeg(mutate s: slice, cam: Cam): void {
 // ---------------------------------------------------------------------------------------------
 // bm: blockmap root cell (ox:int16 oy:int16 cols:uint8 rows:uint8, ref0 = 4-ary tree of block cells).
 // Move (px,py) -> (nx,ny) in 16.16; true if it crosses a line that blocks in that direction.
-fun blocked(bm: cell, px: int, py: int, nx: int, ny: int): bool {
+// Does the move (px,py) -> (nx,ny) cross a blocking line? Returns the direction (dx, dy) of the first such
+// line in blockmap order, or (0, 0) if the move is free.
+fun hitLine(bm: cell, px: int, py: int, nx: int, ny: int): (int, int) {
     var h = bm.beginParse();
     val ox = h.loadInt(16);
     val oy = h.loadInt(16);
@@ -521,7 +524,7 @@ fun blocked(bm: cell, px: int, py: int, nx: int, ny: int): bool {
                         val e2 = mx * ((ly2 << 16) - py) - my * ((lx2 << 16) - px);
                         if ((e1 != 0) & (e2 != 0) & ((e1 < 0) != (e2 < 0))) {
                             if (c1 < 0 ? (flags & 2) != 0 : (flags & 1) != 0) {
-                                return true;
+                                return (dx, dy);
                             }
                         }
                     }
@@ -536,7 +539,13 @@ fun blocked(bm: cell, px: int, py: int, nx: int, ny: int): bool {
         }
         by += 1;
     }
-    return false;
+    return (0, 0);
+}
+
+@inline
+fun blocked(bm: cell, px: int, py: int, nx: int, ny: int): bool {
+    val (dx, dy) = hitLine(bm, px, py, nx, ny);
+    return (dx | dy) != 0;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -709,22 +718,23 @@ fun queuedCount(queue: cell?, qpos: int): int {
 }
 
 // Pop one input. Returns (turn, fwd, side, found).
-fun popInput(mutate st: Storage): (int, int, int, bool) {
+fun popInput(mutate st: Storage): (int, int, int, bool, bool) {
     if (st.queue == null) {
-        return (0, 0, 0, false);
+        return (0, 0, 0, false, false);
     }
     var s = st.queue.beginParse();
     val count = s.loadUint(8);
-    s.skipBits(st.qpos * 24);
+    s.skipBits(st.qpos * INPUT_BITS);
     val turn = s.loadInt(8);
     val fwd = s.loadInt(8);
     val side = s.loadInt(8);
+    val fire = (s.loadUint(8) & 1) == 1;
     st.qpos += 1;
     if (st.qpos >= count) {
         st.qpos = 0;
         st.queue = s.remainingRefsCount() > 0 ? s.loadRef() : null;
     }
-    return (turn, fwd, side, true);
+    return (turn, fwd, side, fire, true);
 }
 
 // Render one input (queued, or produced by the AI when the queue is empty and auto is on) and keep the
@@ -736,7 +746,7 @@ fun step(mutate st: Storage, hop: int) {
     val sinTable = lvl.loadRef();
     val blockmap = lvl.loadRef();
     val gun = lvl.loadRef();
-    var (turn, fwd, side, found) = popInput(mutate st);
+    var (turn, fwd, side, fire, found) = popInput(mutate st);
     if (!found & !st.auto) {
         return;
     }
@@ -744,25 +754,47 @@ fun step(mutate st: Storage, hop: int) {
     st.rnd = (st.rnd * 1103515245 + 12345) & 0xFFFFFFFF;
     st.frameNo += 1;
     st.gun = st.gun > 0 ? st.gun - 1 : 0;
-    if (((st.rnd >> 20) & 63) == 0) {
-        st.gun = GUN_FLASH_FRAMES;
-    }
-    if (!found) {
+    if (found) {
+        if (fire) {
+            st.gun = GUN_FLASH_FRAMES;
+        }
+    } else {
+        if (((st.rnd >> 20) & 63) == 0) {
+            st.gun = GUN_FLASH_FRAMES;   // the AI shoots now and then
+        }
         (turn, fwd) = aiStep(mutate st, blockmap, sinTable);
         side = 0;
     }
-    // move (noclip for queued inputs; the AI checks collisions itself)
     val angle = (st.angle + turn) & ANGLE_MASK;
     val sn = sinAt(sinTable, angle);
     val cs = sinAt(sinTable, (angle + QUARTER) & ANGLE_MASK);
-    val px = st.px + fwd * SPEED_FWD * cs + side * SPEED_SIDE * sn;
-    val py = st.py + fwd * SPEED_FWD * sn - side * SPEED_SIDE * cs;
+    var px = st.px + fwd * SPEED_FWD * cs + side * SPEED_SIDE * sn;
+    var py = st.py + fwd * SPEED_FWD * sn - side * SPEED_SIDE * cs;
+    if (found & ((px != st.px) | (py != st.py))) {
+        // player input: collide with the blockmap and slide along the wall that was hit, like Doom
+        // (the AI checks its own moves)
+        val (hdx, hdy) = hitLine(blockmap, st.px, st.py, px, py);
+        if ((hdx | hdy) != 0) {
+            val dot = (px - st.px) * hdx + (py - st.py) * hdy;
+            val len2 = hdx * hdx + hdy * hdy;
+            val sx = st.px + dot * hdx / len2;
+            val sy = st.py + dot * hdy / len2;
+            if (((sx != st.px) | (sy != st.py)) & !blocked(blockmap, st.px, st.py, sx, sy)) {
+                px = sx;
+                py = sy;
+            } else {
+                px = st.px;
+                py = st.py;
+            }
+        }
+    }
+    val moving = (px != st.px) | (py != st.py);
     st.angle = angle;
     st.px = px;
     st.py = py;
     val viewz = floorAt(root, rootIsSS, px, py) + VIEWHEIGHT;
     val cam: Cam = { px, py, sn, cs, vz: viewz };
-    val bob = fwd != 0 ? (GUN_BOB_TABLE >> ((st.frameNo & 15) * 2)) & 3 : 0;
+    val bob = moving ? (GUN_BOB_TABLE >> ((st.frameNo & 15) * 2)) & 3 : 0;
     val pixels = renderFrame(root, rootIsSS, cam, gun, st.gun > 0, bob);
     val queued = queuedCount(st.queue, st.qpos);
     emitFrame(st, viewz, pixels, queued);
@@ -793,7 +825,7 @@ fun onBouncedMessage(in: InMessageBounced) {
     }
     var st = Storage.load();
     // the failed frame is skipped: drop its input, or (AI) turn a little so the retry renders another view
-    val (_, _, _, found) = popInput(mutate st);
+    val (_, _, _, _, found) = popInput(mutate st);
     if (!found) {
         if (!st.auto) {
             return;
@@ -886,8 +918,8 @@ fun onExternalMessage(inBody: slice) {
     assert ((count > 0) & (count <= MAX_INPUTS)) throw ERR_BAD_COUNT;
     acceptExternalMessage();
 
-    // enqueue the batch: [count:8, count x 24 bits]
-    val batch = beginCell().storeUint(count, 8).storeSlice(body.getFirstBits(count * 24)).endCell();
+    // enqueue the batch: [count:8, count x INPUT_BITS]
+    val batch = beginCell().storeUint(count, 8).storeSlice(body.getFirstBits(count * INPUT_BITS)).endCell();
     if (!isNext) {
         st.held = batch;      // lastBatch+2 before lastBatch+1: hold it
         st.save();
