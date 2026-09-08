@@ -12,7 +12,12 @@
   header input.addr { width: 46ch; }
   header button { background: #333; color: #eee; border: 1px solid #555; padding: 4px 10px; font: inherit; cursor: pointer; }
   header button.on { background: #2a5; color: #000; }
-  #about { margin: 0; padding: 8px 12px 16px; color: #999; max-width: 90ch; }
+  #about { margin: 0; padding: 8px 12px 0; color: #999; max-width: 90ch; }
+  #frames { padding: 4px 12px 24px; color: #999; max-width: 90ch; }
+  #frames h3 { color: #ccc; font-size: 13px; margin: 14px 0 4px; }
+  #frames p { margin: 6px 0; }
+  #frames pre { background: #161616; border: 1px solid #2a2a2a; padding: 8px 10px; overflow-x: auto; color: #bbb; margin: 6px 0; }
+  #frames code { color: #bbb; }
   main { display: flex; gap: 16px; padding: 12px; flex-wrap: wrap; align-items: flex-start; }
   canvas { image-rendering: pixelated; image-rendering: crisp-edges; background: #000; border: 1px solid #333; }
   #stats { min-width: 34ch; white-space: pre; }
@@ -44,6 +49,39 @@
 the viewer only reads the frames back from testnet.
 <a id="explorer" href="#" target="_blank" rel="noopener">contract in explorer</a> ·
 <a href="https://github.com/1IxI1/ton-doom" target="_blank" rel="noopener">source</a></p>
+<section id="frames">
+<h3>How a frame gets here</h3>
+<p>Every transaction of the contract renders exactly one frame and emits it as an <b>external-out message</b>
+(a message with no destination: the TVM's log channel, it costs nothing to deliver and is stored in the
+block with the transaction). The contract then sends itself a small internal message (<code>CONT</code>,
+0.1 GRAM) to render the next frame in the next transaction, up to ~10 frames per block. This page subscribes to
+the contract's transactions on toncenter (WebSocket streaming with an API key, or one poll of
+<code>/api/v3/transactions</code> per second without one) and decodes the body of every outgoing message
+that has an empty destination.</p>
+<p>The body is one cell plus a chain of cells (TL-B):</p>
+<pre>frame#4652414D            // "FRAM"
+  frameNo:uint32          // sequence number
+  w:uint16 h:uint16       // 80 x 120
+  px:int32 py:int32       // player position, 16.16 fixed point map units
+  angle:uint16            // 0..511, 512 units = 360 degrees
+  viewz:int16             // eye height (sector floor + 41)
+  flags:uint8             // bit 0: partial frame (gas budget hit mid-walk)
+  queued:uint16           // inputs still queued after this frame
+  pixels:^Cell            // the picture, see below
+  = FrameEvent;</pre>
+<p>The picture is <b>1 bit per pixel, stored by columns</b>, because the renderer works in columns like Doom's
+(each wall segment is drawn as a run of vertical spans). One column is a 120-bit integer: the most significant
+bit is the top row, 1 = lit. A cell holds at most 1023 bits, so 8 columns (960 bits) go into one cell and
+reference 0 points to the cell with the next 8; 80 columns make a chain of 10 cells, 1200 bytes per frame.
+Pixels are 2:1 tall, so 80x120 is shown as 4:3.</p>
+<p>Inside the contract the same column integer is the working data structure of the renderer: while the BSP
+tree is walked front to back, each column keeps the drawn pixels in its low 120 bits and the still-open
+ceiling..floor window in the bits above; an 80-bit mask marks columns that are fully closed, so later walls
+skip them (occlusion). Packing the frame at the end is just <code>column &amp; ((1 &lt;&lt; 120) - 1)</code> for
+each column. The decoder is ~30 lines: <code>viewer/boc.js</code> parses the BOC, <code>viewer/viewer.js</code>
+reads the fields above and paints the columns onto a canvas; <code>tools/doom.py frames</code> does the same
+into PNG files.</p>
+</section>
 <script src="config.js"></script>
 <script src="boc.js"></script>
 <script src="viewer.js"></script>
