@@ -222,25 +222,38 @@ def column_pattern(level: int, phase: int, H: int) -> int:
 # Renderer
 # --------------------------------------------------------------------------- #
 class Renderer:
-    def __init__(self, level: Level, W: int = 128, H: int = 96):
+    def __init__(self, level: Level, W: int = 128, H: int = 96, aspect_y: int = 1):
+        """aspect_y: rows per column unit (2 = the viewer shows each row at half height, e.g. 80x120 -> 4:3)."""
         self.level = level
         self.W, self.H = W, H
         self.CX = W // 2
         self.CY = H // 2
         self.FOCAL = W // 2  # 90 degree horizontal FOV
+        self.ASPECT_Y = aspect_y
         self.FULL = (1 << H) - 1
         self.FULLW = (1 << W) - 1
         # wall shade levels by depth (map units); mirrors contracts/Doom.tolk
         self.shade_depths = [96, 192, 384, 768]
-        REP = self.FULL // 15                      # one nibble per 4 rows
         FULL = self.FULL
+        # dither cell is aspect_y rows tall: a 4-row nibble pattern becomes a (4*aspect_y)-row pattern
+        unit_rows = 4 * aspect_y
+        assert H % unit_rows == 0
+        REP = FULL // ((1 << unit_rows) - 1)       # one unit per unit_rows rows
+
+        def pat(nibble):
+            v = 0
+            for i in range(4):
+                if (nibble >> (3 - i)) & 1:
+                    for k in range(aspect_y):
+                        v |= 1 << (unit_rows - 1 - (i * aspect_y + k))
+            return v * REP
         # pattern levels: (even column, odd column)
         self.PAT = {
             0: (0, 0),
-            1: (0b1000 * REP, 0),                  # 12.5 %  sky
-            2: (0b1010 * REP, 0),                  # 25 %    floor, far walls
-            3: (0b1010 * REP, 0b0101 * REP),       # 50 %
-            4: (0b1010 * REP, 0b1111 * REP),       # 75 %
+            1: (pat(0b1000), 0),                   # 12.5 %  sky
+            2: (pat(0b1010), 0),                   # 25 %    floor, far walls
+            3: (pat(0b1010), pat(0b0101)),         # 50 %
+            4: (pat(0b1010), pat(0b1111)),         # 75 %
             5: (FULL, FULL),                       # 100 %
         }
         self.floor_pat = self.PAT[2]
@@ -405,16 +418,16 @@ class Renderer:
         dd2 = 2 * dd
         step24 = fdiv(dd << 40, C)
         vz = self.viewz >> FRAC
-        worldtop = seg.fceil - vz
-        worldbottom = seg.ffloor - vz
+        worldtop = (seg.fceil - vz) * self.ASPECT_Y
+        worldbottom = (seg.ffloor - vz) * self.ASPECT_Y
         CY24 = self.CY << 24
         topstep = -worldtop * step24
         botstep = -worldbottom * step24
         variant = "solid"
         if seg.kind == PORTAL:
             variant = {(True, False): "up", (False, True): "lo", (True, True): "both"}[(seg.has_upper, seg.has_lower)]
-        worldhigh = seg.bceil - vz
-        worldlow = seg.bfloor - vz
+        worldhigh = (seg.bceil - vz) * self.ASPECT_Y
+        worldlow = (seg.bfloor - vz) * self.ASPECT_Y
         highstep = -worldhigh * step24
         lowstep = -worldlow * step24
         # shade from the mean endpoint depth (16.16): level 0 (near) .. 4 (far), one step per 96 map units

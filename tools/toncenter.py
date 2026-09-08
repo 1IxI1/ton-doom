@@ -6,7 +6,7 @@ on 2026-09-08. See docs/ notes (scratchpad/notes/toncenter.md) for the endpoint 
 
 Config (env):
   TONCENTER_URL      base URL, default https://testnet.toncenter.com
-  TONCENTER_API_KEY  API key, sent as the X-API-Key header (default: project testnet key)
+  TONCENTER_API_KEY  API key, sent as the X-API-Key header (also read from .env: TONCENTER_TESTNET_API_KEY)
 
 Library:
   send_boc(boc_bytes) -> str                       POST /api/v3/message, returns message_hash (base64)
@@ -37,7 +37,25 @@ import urllib.parse
 import urllib.request
 
 DEFAULT_URL = "https://testnet.toncenter.com"
-DEFAULT_API_KEY = ""  # set TONCENTER_API_KEY
+
+
+def _load_dotenv() -> dict:
+    """Read KEY=VALUE pairs from the project's .env (next to tools/), if present."""
+    out = {}
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".env")
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    out[k.strip()] = v.strip()
+    except OSError:
+        pass
+    return out
+
+
+_DOTENV = _load_dotenv()
 
 MAX_PAGE = 1000  # server rejects limit > 1000 ("limit is not allowed: 1001 > 1000")
 USER_AGENT = "ton-doom/0.1 (+https://github.com/verdigo/ton-doom)"
@@ -57,7 +75,11 @@ def _base_url() -> str:
 
 
 def _api_key() -> str:
-    return os.environ.get("TONCENTER_API_KEY", DEFAULT_API_KEY)
+    for name in ("TONCENTER_API_KEY", "TONCENTER_TESTNET_API_KEY"):
+        v = os.environ.get(name) or _DOTENV.get(name)
+        if v:
+            return v
+    return ""
 
 
 def _request(method: str, path: str, params: dict | None = None, body: dict | None = None,

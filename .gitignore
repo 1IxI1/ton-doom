@@ -4,3 +4,4 @@ build/
 __pycache__/
 *.pyc
 assets/doom1.wad
+viewer/config.js

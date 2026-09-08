@@ -6,18 +6,14 @@
 
 (() => {
   const OP_FRAME = 0x4652414d;
-  const DEFAULTS = {
-    addr: 'kQDWQ2yYzm-O4orAS5WN6pxuuPFgtaAjIdwVUY1ocnmtb89t',
-    key: '',
-    base: 'testnet.toncenter.com',
-  };
+  // config.js is generated from .env by `python3 tools/viewer_config.py` (not committed):
+  //   window.DOOM_CONFIG = { addr: DOOM_ADDRESS, key: TONCENTER_TESTNET_API_KEY }
+  const CFG = window.DOOM_CONFIG || {};
+  const DEFAULTS = { base: 'testnet.toncenter.com' };
 
   const $ = (id) => document.getElementById(id);
-  const params = new URLSearchParams(location.search);
-  let stored = {};
-  try { stored = JSON.parse(localStorage.getItem('doom.settings') || '{}'); } catch (e) {}
-  $('addr').value = params.get('addr') || DEFAULTS.addr;
-  $('key').value = params.get('key') || stored.key || DEFAULTS.key;
+  $('addr').value = CFG.addr || '';
+  $('key').value = CFG.key || '';
 
   const canvas = $('screen');
   const ctx = canvas.getContext('2d');
@@ -153,7 +149,7 @@
   function connectWs() {
     disconnect();
     const addr = $('addr').value.trim(), key = $('key').value.trim();
-    try { localStorage.setItem('doom.settings', JSON.stringify({ key })); } catch (e) {}
+    if (!addr || !key) { setStatus('set contract address and api key (python3 tools/viewer_config.py)', 'err'); return; }
     const url = `wss://${DEFAULTS.base}/api/streaming/v2/ws?api_key=${encodeURIComponent(key)}`;
     setStatus('connecting…', 'warn');
     ws = new WebSocket(url);
@@ -217,5 +213,5 @@
   $('connect').onclick = () => (ws ? disconnect() : connectWs());
   $('poll').onclick = () => (pollTimer ? disconnect() : startPoll());
   $('pause').onclick = () => { paused = !paused; $('pause').classList.toggle('on', paused); };
-  if (params.get('auto') !== '0') connectWs();
+  if (CFG.addr && CFG.key) connectWs();
 })();

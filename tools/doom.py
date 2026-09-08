@@ -236,18 +236,19 @@ def cmd_frames(args):
 
 
 def main(argv=None):
+    default_addr = toncenter._DOTENV.get("DOOM_ADDRESS") or os.environ.get("DOOM_ADDRESS")
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
-    p = sub.add_parser("send"); p.add_argument("addr"); p.add_argument("--batch", type=int, required=True)
+    p = sub.add_parser("send"); p.add_argument("addr", nargs="?", default=default_addr); p.add_argument("--batch", type=int, required=True)
     p.add_argument("--inputs", required=True); p.set_defaults(fn=cmd_send)
-    p = sub.add_parser("demo"); p.add_argument("addr"); p.add_argument("--rate", type=float, default=20.0, help="inputs per second")
+    p = sub.add_parser("demo"); p.add_argument("addr", nargs="?", default=default_addr); p.add_argument("--rate", type=float, default=20.0, help="inputs per second")
     p.add_argument("--batch", type=int, default=20, help="inputs per external (<= 40; keep externals <= ~2/s)"); p.add_argument("--max-queue", type=int, default=80)
     p.add_argument("--skip", type=int, default=0, help="skip this many inputs of the route (resume position)")
     p.add_argument("--no-reset", action="store_true", help="do not teleport the player to the start first"); p.set_defaults(fn=cmd_demo)
-    p = sub.add_parser("reset"); p.add_argument("addr"); p.add_argument("--batch", type=int, required=True); p.set_defaults(fn=lambda a: print(send_reset(Address.parse(a.addr), a.batch)))
-    p = sub.add_parser("frames"); p.add_argument("addr"); p.add_argument("--limit", type=int, default=20)
+    p = sub.add_parser("reset"); p.add_argument("addr", nargs="?", default=default_addr); p.add_argument("--batch", type=int, required=True); p.set_defaults(fn=lambda a: print(send_reset(Address.parse(a.addr), a.batch)))
+    p = sub.add_parser("frames"); p.add_argument("addr", nargs="?", default=default_addr); p.add_argument("--limit", type=int, default=20)
     p.add_argument("--png-dir"); p.set_defaults(fn=cmd_frames)
-    p = sub.add_parser("state"); p.add_argument("addr"); p.set_defaults(fn=cmd_state)
+    p = sub.add_parser("state"); p.add_argument("addr", nargs="?", default=default_addr); p.set_defaults(fn=cmd_state)
     args = ap.parse_args(argv)
     return args.fn(args)
 

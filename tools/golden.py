@@ -26,10 +26,10 @@ PATHS = {
 }
 
 
-def gen(level: Level, inputs, W: int, H: int, png_dir=None):
+def gen(level: Level, inputs, W: int, H: int, png_dir=None, aspect_y: int = 1):
     sx, sy, sa = level.player_start
     player = Player(level, sx, sy, sa)
-    r = Renderer(level, W, H)
+    r = Renderer(level, W, H, aspect_y)
     frames = []
     for i, (turn, fwd, side) in enumerate(inputs):
         player.move(turn, fwd, side)
@@ -72,10 +72,11 @@ def main(argv=None):
     ap.add_argument("--H", type=int, default=96)
     ap.add_argument("--path", default="walk")
     ap.add_argument("--png-dir")
+    ap.add_argument("--aspect", type=int, default=1, help="rows per column unit (2 for 80x120 shown as 4:3)")
     args = ap.parse_args(argv)
     level = load_level(args.level)
     inputs = PATHS[args.path]
-    frames = gen(level, inputs, args.W, args.H, args.png_dir)
+    frames = gen(level, inputs, args.W, args.H, args.png_dir, args.aspect)
     root = build_boc(inputs, frames, args.W, args.H)
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     with open(args.out, "wb") as f:

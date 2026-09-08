@@ -26,7 +26,8 @@ contract Doom {
 // Screen / fixed point constants
 // ---------------------------------------------------------------------------------------------
 const W = 80;                     // columns
-const H = 60;                     // rows (multiple of 4); render-asm.tolk is generated for this H
+const H = 120;                    // rows (multiple of 8); render-asm.tolk is generated for this H
+const ASPECT_Y = 2;               // rows per column unit: the viewer shows each row at half height (4:3)
 const CX = W / 2;
 const CY = H / 2;
 const FOCAL = W / 2;              // 90 degree horizontal FOV
@@ -50,14 +51,15 @@ const CONT_VALUE = 100000000;     // 0.1 TON attached to each self-continuation 
 const SEG_TAIL_BITS = 66;         // bits of a seg record after kind + 4 coords
 const SHADE_UNIT2 = 2 * 96 << 16; // (d1 + d2) in 16.16 divided by this gives the shade level step (96 map units)
 
-// dither patterns: 4-row nibble replicated over the column; even / odd column phases
-const REP = FULL / 15;                     // 0b0001 0001 ... (H/4 nibbles)
-const PAT_L2_0 = 0b1010 * REP;             // 25 %    (floor, far walls)
+// dither patterns: 8-row byte (4-row nibble with each bit doubled for ASPECT_Y = 2) replicated over the
+// column; even / odd column phases
+const REP = FULL / 255;                    // 0x01 0x01 ... (H/8 bytes)
+const PAT_L2_0 = 0b11001100 * REP;         // 25 %    (floor, far walls)
 const PAT_L2_1 = 0;
-const PAT_L3_0 = 0b1010 * REP;             // 50 %
-const PAT_L3_1 = 0b0101 * REP;
-const PAT_L4_0 = 0b1010 * REP;             // 75 %
-const PAT_L4_1 = 0b1111 * REP;
+const PAT_L3_0 = 0b11001100 * REP;         // 50 %
+const PAT_L3_1 = 0b00110011 * REP;
+const PAT_L4_0 = 0b11001100 * REP;         // 75 %
+const PAT_L4_1 = 0b11111111 * REP;
 const PAT_L5_0 = FULL;                     // 100 %
 const PAT_L5_1 = FULL;
 const FLOOR01 = PAT_L2_0 | (PAT_L2_1 << H); // floor pattern pair packed for the asm seg drawers
@@ -390,11 +392,11 @@ fun drawSeg(mutate s: slice, cam: Cam): void {
         return;
     }
     if (DEBUG) { gProfSegsDrawn += 1; gProfGasSetup += getGasConsumedAtTheMoment() - gasE; }
-    val worldbottom = s.loadInt(16) - cam.vz;
-    val worldtop = s.loadInt(16) - cam.vz;
+    val worldbottom = (s.loadInt(16) - cam.vz) * ASPECT_Y;
+    val worldtop = (s.loadInt(16) - cam.vz) * ASPECT_Y;
     val lightAdj = s.loadInt(2);
-    val worldlow = s.loadInt(16) - cam.vz;
-    val worldhigh = s.loadInt(16) - cam.vz;
+    val worldlow = (s.loadInt(16) - cam.vz) * ASPECT_Y;
+    val worldhigh = (s.loadInt(16) - cam.vz) * ASPECT_Y;
 
     val dd = d2 - d1;
     val negC = -C;

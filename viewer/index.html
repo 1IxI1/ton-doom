@@ -26,7 +26,7 @@
 <header>
   <b>DOOM on TON</b>
   <label>contract <input class="addr" id="addr" value=""></label>
-  <label>api key <input class="key" id="key" value=""></label>
+  <label>api key <input class="key" id="key" value="" placeholder="from .env via tools/viewer_config.py"></label>
   <label>fps <input id="fps" value="25" style="width:5ch"></label>
   <button id="connect">connect</button>
   <button id="poll">poll mode</button>
@@ -40,6 +40,7 @@
     <div id="log"></div>
   </div>
 </main>
+<script src="config.js"></script>
 <script src="boc.js"></script>
 <script src="viewer.js"></script>
 </body>

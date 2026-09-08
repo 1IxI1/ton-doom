@@ -38,16 +38,16 @@ Nothing is rendered off-chain: only `turn / forward / strafe` inputs go to the c
 ```bash
 acton build && acton test                  # emulator: golden-frame tests, gas numbers
 acton script scripts/deploy.tolk --net testnet     # deploy (wallet main-w9), prints DOOM_ADDRESS
-python3 tools/doom.py demo <DOOM_ADDRESS> --rate 25 --batch 30   # feed the scripted E1M1 walk
-open viewer/index.html                     # ?addr=<DOOM_ADDRESS>
+python3 tools/doom.py demo --rate 25 --batch 30   # feed the scripted E1M1 walk (address from .env)
+python3 tools/viewer_config.py && open viewer/index.html   # viewer config (address, key) from .env
 ```
 
-Needs `assets/doom1.wad` (shareware, `python3 tools/wad.py assets/doom1.wad E1M1 --json assets/e1m1.json`)
-and `TONCENTER_TESTNET_API_KEY` in `.env`.
+`.env` (not committed) holds `TONCENTER_TESTNET_API_KEY=...` and `DOOM_ADDRESS=...` (printed by the deploy
+script). Needs `assets/doom1.wad` (shareware; `python3 tools/wad.py assets/doom1.wad E1M1 --json assets/e1m1.json`).
 
-## Numbers (testnet, 80x60)
+## Numbers (testnet, 80x120 shown at 4:3)
 
-* ~660k gas per frame on average, max ~980k (guarded); 0.047 TON per frame.
+* ~700k gas per frame on average, max ~980k (guarded); ~0.05 TON per frame. Vertical resolution is free (cost is per column).
 * Frames reach the viewer ~0.6 s after the block time (`confirmed` finality).
 * External messages to one address are rate-limited by the mempool (~30 per 10 s), hence batches of
   20–40 inputs per external and the self-message chain for rendering.
