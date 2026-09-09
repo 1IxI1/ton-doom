@@ -110,12 +110,16 @@
   setInterval(() => { if (!current.watchOnly) probe(current); renderServers(); }, 20000);
 
   // ---- transport by mode: key -> streaming (WebSocket, ~0.4 s), no key -> polling (~1 req/s) ---------
+  // the AI demo is polled even with a key (nothing to react to, no need for the stream); "streaming" under "more" still works
   function applyMode() {
     const key = hasKey();
+    const stream = key && !current.watchOnly;
     $('pendingopt').hidden = !key;
-    $('modeinfo').textContent = key ? 'streaming (api key)' : 'polling, no api key: ~1 request/s shared by frames and inputs; a free key from @tonapibot makes it ~4x faster';
+    $('modeinfo').textContent = stream ? 'streaming (api key)'
+      : key ? 'polling (api key)'
+      : 'polling, no api key: ~1 request/s shared by frames and inputs; a free key from @tonapibot makes it ~4x faster';
     $('fps').value = key ? '25' : '15';
-    if (key) connectWs(); else startPoll();
+    if (stream) connectWs(); else startPoll();
   }
 
   const canvas = $('screen');
